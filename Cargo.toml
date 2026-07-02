@@ -1,0 +1,16 @@
+[package]
+name = "airgap-guardian"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.1", features = ["derive"] }
+comfy-table = "7.2.2"
+owo-colors = "4.3.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+walkdir = "2.5.0"
+x509-parser = "0.18.1"
