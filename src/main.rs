@@ -13,8 +13,9 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use cli::{Cli, Command};
-use errors::ScanError;
+use errors::{PolicyError, ScanError};
 use models::ScanResult;
+use policy::Policy;
 use scanner::Scanner;
 use scanner::cert::CertificateScanner;
 
@@ -25,6 +26,7 @@ const EXIT_EXPIRED: u8 = 3;
 const EXIT_USAGE: u8 = 4;
 const EXIT_DIRECTORY_NOT_FOUND: u8 = 5;
 const EXIT_RUNTIME_ERROR: u8 = 6;
+const EXIT_POLICY_ERROR: u8 = 7;
 
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
@@ -44,7 +46,8 @@ fn main() -> ExitCode {
             directory,
             json,
             html,
-        } => run_scan(directory, json, html),
+            policy,
+        } => run_scan(directory, json, html, policy),
         Command::Version => {
             println!("airgap-guardian {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(EXIT_OK)
@@ -52,12 +55,22 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_scan(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitCode {
+fn run_scan(
+    directory: PathBuf,
+    json: bool,
+    html: Option<PathBuf>,
+    policy_file: Option<PathBuf>,
+) -> ExitCode {
+    let policy = match load_policy(policy_file.as_deref()) {
+        Ok(policy) => policy,
+        Err(e) => return report_failure(&e.into()),
+    };
+
     let mut result = match CertificateScanner::new(directory).scan() {
         Ok(result) => result,
         Err(e) => return report_failure(&e),
     };
-    analysis::analyze(&mut result, &policy::Policy::default());
+    analysis::analyze(&mut result, &policy);
 
     if json {
         if let Err(e) = report::json::print(&result) {
@@ -77,13 +90,25 @@ fn run_scan(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitCode {
     ExitCode::from(severity_exit_code(&result))
 }
 
+fn load_policy(path: Option<&std::path::Path>) -> Result<Policy, PolicyError> {
+    match path {
+        Some(path) => Policy::load(path),
+        None => Ok(Policy::default()),
+    }
+}
+
 fn report_failure(error: &anyhow::Error) -> ExitCode {
     eprintln!("Error: {error:#}");
-    let code = match error.downcast_ref::<ScanError>() {
-        Some(ScanError::DirectoryNotFound(_) | ScanError::NotADirectory(_)) => {
-            EXIT_DIRECTORY_NOT_FOUND
+    let code = if let Some(scan_error) = error.downcast_ref::<ScanError>() {
+        match scan_error {
+            ScanError::DirectoryNotFound(_) | ScanError::NotADirectory(_) => {
+                EXIT_DIRECTORY_NOT_FOUND
+            }
         }
-        None => EXIT_RUNTIME_ERROR,
+    } else if error.downcast_ref::<PolicyError>().is_some() {
+        EXIT_POLICY_ERROR
+    } else {
+        EXIT_RUNTIME_ERROR
     };
     ExitCode::from(code)
 }

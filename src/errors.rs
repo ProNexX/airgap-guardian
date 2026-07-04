@@ -11,12 +11,12 @@ pub enum ScanError {
 
 #[derive(Debug, Error)]
 pub enum PolicyError {
-    #[error("cannot read policy file {}: {source}", .path.display())]
+    #[error("cannot read policy file {}", .path.display())]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("invalid policy file {}: {source}", .path.display())]
+    #[error("invalid policy file {}", .path.display())]
     Parse {
         path: PathBuf,
         source: toml::de::Error,

@@ -24,6 +24,9 @@ pub enum Command {
         /// Write a standalone HTML report to the given file
         #[arg(long, value_name = "FILE")]
         html: Option<PathBuf>,
+        /// TOML policy file with security thresholds (built-in defaults if omitted)
+        #[arg(long, value_name = "FILE")]
+        policy: Option<PathBuf>,
     },
     /// Print version information
     Version,
