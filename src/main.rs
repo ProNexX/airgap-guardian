@@ -2,6 +2,7 @@ mod analysis;
 mod cli;
 mod errors;
 mod models;
+mod policy;
 mod report;
 mod scanner;
 

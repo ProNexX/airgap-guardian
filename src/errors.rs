@@ -8,3 +8,19 @@ pub enum ScanError {
     #[error("not a directory: {}", .0.display())]
     NotADirectory(PathBuf),
 }
+
+#[derive(Debug, Error)]
+pub enum PolicyError {
+    #[error("cannot read policy file {}: {source}", .path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("invalid policy file {}: {source}", .path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("invalid policy: {0}")]
+    Invalid(String),
+}
