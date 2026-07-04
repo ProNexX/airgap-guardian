@@ -16,12 +16,26 @@ pub enum CertificateStatus {
 
 impl CertificateStatus {
     pub fn evaluate(not_after: DateTime<Utc>, now: DateTime<Utc>) -> Self {
+        Self::with_thresholds(
+            not_after,
+            now,
+            WARNING_THRESHOLD_DAYS,
+            CRITICAL_THRESHOLD_DAYS,
+        )
+    }
+
+    pub fn with_thresholds(
+        not_after: DateTime<Utc>,
+        now: DateTime<Utc>,
+        warning_days: i64,
+        critical_days: i64,
+    ) -> Self {
         if not_after < now {
             return Self::Expired;
         }
         match days_remaining(not_after, now) {
-            d if d <= CRITICAL_THRESHOLD_DAYS => Self::Critical,
-            d if d <= WARNING_THRESHOLD_DAYS => Self::Warning,
+            d if d <= critical_days => Self::Critical,
+            d if d <= warning_days => Self::Warning,
             _ => Self::Ok,
         }
     }
@@ -144,20 +158,28 @@ pub struct ScanResult {
 
 impl ScanResult {
     pub fn new(certificates: Vec<CertificateInfo>, errors: Vec<ParseFailure>) -> Self {
-        let count = |status| certificates.iter().filter(|c| c.status == status).count();
-        let summary = ScanSummary {
-            total: certificates.len(),
-            ok: count(CertificateStatus::Ok),
-            warning: count(CertificateStatus::Warning),
-            critical: count(CertificateStatus::Critical),
-            expired: count(CertificateStatus::Expired),
-            parse_errors: errors.len(),
-        };
+        let summary = summarize(&certificates, errors.len());
         Self {
             summary,
             certificates,
             errors,
         }
+    }
+
+    pub fn recompute_summary(&mut self) {
+        self.summary = summarize(&self.certificates, self.errors.len());
+    }
+}
+
+fn summarize(certificates: &[CertificateInfo], parse_errors: usize) -> ScanSummary {
+    let count = |status| certificates.iter().filter(|c| c.status == status).count();
+    ScanSummary {
+        total: certificates.len(),
+        ok: count(CertificateStatus::Ok),
+        warning: count(CertificateStatus::Warning),
+        critical: count(CertificateStatus::Critical),
+        expired: count(CertificateStatus::Expired),
+        parse_errors,
     }
 }
 

@@ -281,7 +281,7 @@ mod tests {
             risk_score: Default::default(),
             findings: Vec::new(),
         };
-        cert.findings = analysis::evaluate(&cert);
+        cert.findings = analysis::evaluate(&cert, &crate::policy::Policy::default());
         cert.risk_score = analysis::risk_score(cert.status, &cert.findings);
         let errors = vec![ParseFailure {
             path: "certs/bad.pem".into(),
@@ -306,8 +306,10 @@ mod tests {
         assert!(html.contains("certs/vpn.crt"));
         assert!(html.contains("badge-critical"));
         assert!(html.contains(">85<") || html.contains("Risk 85"));
-        assert!(html.contains("RSA key is only 1024 bits."));
-        assert!(html.contains("Weak signature algorithm (sha1WithRSAEncryption)."));
+        assert!(html.contains("RSA key is only 1024 bits"));
+        assert!(
+            html.contains("Signature algorithm sha1WithRSAEncryption is not allowed by policy.")
+        );
         assert!(html.contains("class=\"flagged\""));
         assert!(html.contains("Parse errors"));
     }

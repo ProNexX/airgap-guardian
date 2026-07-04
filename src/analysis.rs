@@ -1,9 +1,9 @@
+use chrono::Utc;
+
 use crate::models::{
     CertificateInfo, CertificateStatus, Finding, FindingSeverity, RiskScore, ScanResult,
 };
-
-pub const MAX_VALIDITY_DAYS: i64 = 398;
-pub const MIN_RSA_KEY_BITS: usize = 2048;
+use crate::policy::Policy;
 
 pub mod rules {
     pub const WEAK_SIGNATURE: &str = "weak_signature";
@@ -14,21 +14,29 @@ pub mod rules {
     pub const MISSING_SAN: &str = "missing_san";
 }
 
-pub fn analyze(result: &mut ScanResult) {
+pub fn analyze(result: &mut ScanResult, policy: &Policy) {
+    let now = Utc::now();
     for cert in &mut result.certificates {
-        cert.findings = evaluate(cert);
+        cert.status = CertificateStatus::with_thresholds(
+            cert.not_after,
+            now,
+            policy.warning_days,
+            policy.critical_days,
+        );
+        cert.findings = evaluate(cert, policy);
         cert.risk_score = risk_score(cert.status, &cert.findings);
     }
+    result.recompute_summary();
 }
 
-pub fn evaluate(cert: &CertificateInfo) -> Vec<Finding> {
+pub fn evaluate(cert: &CertificateInfo, policy: &Policy) -> Vec<Finding> {
     [
-        check_signature_algorithm(cert),
-        check_rsa_key(cert),
-        check_self_signed(cert),
+        check_signature_algorithm(cert, policy),
+        check_rsa_key(cert, policy),
+        check_self_signed(cert, policy),
         check_validity_period(cert),
-        check_lifetime(cert),
-        check_san(cert),
+        check_lifetime(cert, policy),
+        check_san(cert, policy),
     ]
     .into_iter()
     .flatten()
@@ -61,21 +69,20 @@ fn rule_points(rule: &str) -> u32 {
     }
 }
 
-fn check_signature_algorithm(cert: &CertificateInfo) -> Option<Finding> {
-    let algorithm = cert.signature_algorithm.to_ascii_lowercase();
-    let weak = ["md5", "sha-1", "sha1"]
-        .into_iter()
-        .any(|w| algorithm.contains(w));
-    weak.then(|| {
+fn check_signature_algorithm(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
+    (!policy.allows_signature_algorithm(&cert.signature_algorithm)).then(|| {
         Finding::new(
             FindingSeverity::Warning,
             rules::WEAK_SIGNATURE,
-            format!("Weak signature algorithm ({}).", cert.signature_algorithm),
+            format!(
+                "Signature algorithm {} is not allowed by policy.",
+                cert.signature_algorithm
+            ),
         )
     })
 }
 
-fn check_rsa_key(cert: &CertificateInfo) -> Option<Finding> {
+fn check_rsa_key(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
     if !cert
         .public_key_algorithm
         .to_ascii_lowercase()
@@ -84,17 +91,20 @@ fn check_rsa_key(cert: &CertificateInfo) -> Option<Finding> {
         return None;
     }
     let bits = cert.key_size?;
-    (bits < MIN_RSA_KEY_BITS).then(|| {
+    (bits < policy.min_rsa_key_size).then(|| {
         Finding::new(
             FindingSeverity::Critical,
             rules::WEAK_RSA,
-            format!("RSA key is only {bits} bits."),
+            format!(
+                "RSA key is only {bits} bits (policy requires at least {}).",
+                policy.min_rsa_key_size
+            ),
         )
     })
 }
 
-fn check_self_signed(cert: &CertificateInfo) -> Option<Finding> {
-    if cert.subject != cert.issuer {
+fn check_self_signed(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
+    if policy.allow_self_signed || cert.subject != cert.issuer {
         return None;
     }
     let (severity, message) = if cert.is_ca {
@@ -118,19 +128,22 @@ fn check_validity_period(cert: &CertificateInfo) -> Option<Finding> {
     })
 }
 
-fn check_lifetime(cert: &CertificateInfo) -> Option<Finding> {
+fn check_lifetime(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
     let days = (cert.not_after - cert.not_before).num_days();
-    (days > MAX_VALIDITY_DAYS).then(|| {
+    (days > policy.max_certificate_lifetime_days).then(|| {
         Finding::new(
             FindingSeverity::Warning,
             rules::LONG_VALIDITY,
-            format!("Certificate lifetime of {days} days exceeds {MAX_VALIDITY_DAYS} days."),
+            format!(
+                "Certificate lifetime of {days} days exceeds {} days.",
+                policy.max_certificate_lifetime_days
+            ),
         )
     })
 }
 
-fn check_san(cert: &CertificateInfo) -> Option<Finding> {
-    (!cert.has_san).then(|| {
+fn check_san(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
+    (policy.required_subject_alternative_name && !cert.has_san).then(|| {
         Finding::new(
             FindingSeverity::Warning,
             rules::MISSING_SAN,
@@ -175,47 +188,76 @@ mod tests {
         findings.iter().map(|f| f.rule.as_str()).collect()
     }
 
+    fn default_policy() -> Policy {
+        Policy::default()
+    }
+
     #[test]
     fn healthy_certificate_has_no_findings() {
-        assert!(evaluate(&healthy_cert()).is_empty());
+        assert!(evaluate(&healthy_cert(), &default_policy()).is_empty());
     }
 
     #[test]
     fn detects_weak_rsa_key() {
         let mut cert = healthy_cert();
         cert.key_size = Some(1024);
-        let findings = evaluate(&cert);
+        let findings = evaluate(&cert, &default_policy());
         assert_eq!(rules_of(&findings), [rules::WEAK_RSA]);
         assert_eq!(findings[0].severity, FindingSeverity::Critical);
         assert!(findings[0].message.contains("1024"));
     }
 
     #[test]
+    fn respects_custom_min_rsa_key_size() {
+        let policy = Policy {
+            min_rsa_key_size: 4096,
+            ..default_policy()
+        };
+        let findings = evaluate(&healthy_cert(), &policy);
+        assert_eq!(rules_of(&findings), [rules::WEAK_RSA]);
+        assert!(findings[0].message.contains("4096"));
+    }
+
+    #[test]
     fn accepts_rsa_2048_and_ignores_non_rsa_keys() {
-        assert!(evaluate(&healthy_cert()).is_empty());
+        assert!(evaluate(&healthy_cert(), &default_policy()).is_empty());
 
         let mut cert = healthy_cert();
         cert.public_key_algorithm = "id-ecPublicKey".into();
         cert.key_size = Some(256);
-        assert!(evaluate(&cert).is_empty());
+        assert!(evaluate(&cert, &default_policy()).is_empty());
     }
 
     #[test]
-    fn detects_weak_signature_algorithms() {
+    fn flags_signature_algorithms_outside_allowed_list() {
         for algorithm in ["sha1WithRSAEncryption", "md5WithRSAEncryption", "RSA-SHA1"] {
             let mut cert = healthy_cert();
             cert.signature_algorithm = algorithm.into();
-            let findings = evaluate(&cert);
+            let findings = evaluate(&cert, &default_policy());
             assert_eq!(rules_of(&findings), [rules::WEAK_SIGNATURE], "{algorithm}");
             assert_eq!(findings[0].severity, FindingSeverity::Warning);
         }
     }
 
     #[test]
+    fn custom_allowed_signature_algorithms_are_enforced() {
+        let policy = Policy {
+            allowed_signature_algorithms: vec!["ecdsa-with-SHA256".into()],
+            ..default_policy()
+        };
+        let findings = evaluate(&healthy_cert(), &policy);
+        assert_eq!(rules_of(&findings), [rules::WEAK_SIGNATURE]);
+
+        let mut cert = healthy_cert();
+        cert.signature_algorithm = "ecdsa-with-SHA256".into();
+        assert!(evaluate(&cert, &policy).is_empty());
+    }
+
+    #[test]
     fn detects_self_signed_certificate() {
         let mut cert = healthy_cert();
         cert.issuer = cert.subject.clone();
-        let findings = evaluate(&cert);
+        let findings = evaluate(&cert, &default_policy());
         assert_eq!(rules_of(&findings), [rules::SELF_SIGNED]);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
     }
@@ -225,16 +267,27 @@ mod tests {
         let mut cert = healthy_cert();
         cert.issuer = cert.subject.clone();
         cert.is_ca = true;
-        let findings = evaluate(&cert);
+        let findings = evaluate(&cert, &default_policy());
         assert_eq!(rules_of(&findings), [rules::SELF_SIGNED]);
         assert_eq!(findings[0].severity, FindingSeverity::Info);
+    }
+
+    #[test]
+    fn policy_can_allow_self_signed_certificates() {
+        let policy = Policy {
+            allow_self_signed: true,
+            ..default_policy()
+        };
+        let mut cert = healthy_cert();
+        cert.issuer = cert.subject.clone();
+        assert!(evaluate(&cert, &policy).is_empty());
     }
 
     #[test]
     fn detects_invalid_validity_period() {
         let now = Utc::now();
         let cert = cert(now + Duration::days(365), now + Duration::days(200));
-        let findings = evaluate(&cert);
+        let findings = evaluate(&cert, &default_policy());
         assert!(rules_of(&findings).contains(&rules::INVALID_VALIDITY));
         let invalid = findings
             .iter()
@@ -246,25 +299,46 @@ mod tests {
     #[test]
     fn detects_long_lifetime() {
         let now = Utc::now();
-        let cert = cert(
-            now - Duration::days(1),
-            now + Duration::days(MAX_VALIDITY_DAYS),
-        );
-        let findings = evaluate(&cert);
+        let policy = default_policy();
+        let max_days = policy.max_certificate_lifetime_days;
+        let cert = cert(now - Duration::days(1), now + Duration::days(max_days));
+        let findings = evaluate(&cert, &policy);
         assert_eq!(rules_of(&findings), [rules::LONG_VALIDITY]);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
 
-        let at_limit = self::cert(now, now + Duration::days(MAX_VALIDITY_DAYS));
-        assert!(evaluate(&at_limit).is_empty());
+        let at_limit = self::cert(now, now + Duration::days(max_days));
+        assert!(evaluate(&at_limit, &policy).is_empty());
+    }
+
+    #[test]
+    fn respects_custom_max_lifetime() {
+        let policy = Policy {
+            max_certificate_lifetime_days: 90,
+            ..default_policy()
+        };
+        let findings = evaluate(&healthy_cert(), &policy);
+        assert_eq!(rules_of(&findings), [rules::LONG_VALIDITY]);
+        assert!(findings[0].message.contains("90"));
     }
 
     #[test]
     fn detects_missing_san() {
         let mut cert = healthy_cert();
         cert.has_san = false;
-        let findings = evaluate(&cert);
+        let findings = evaluate(&cert, &default_policy());
         assert_eq!(rules_of(&findings), [rules::MISSING_SAN]);
         assert_eq!(findings[0].severity, FindingSeverity::Warning);
+    }
+
+    #[test]
+    fn policy_can_make_san_optional() {
+        let policy = Policy {
+            required_subject_alternative_name: false,
+            ..default_policy()
+        };
+        let mut cert = healthy_cert();
+        cert.has_san = false;
+        assert!(evaluate(&cert, &policy).is_empty());
     }
 
     #[test]
@@ -301,7 +375,7 @@ mod tests {
         weak.key_size = Some(1024);
         let mut result = ScanResult::new(vec![healthy_cert(), weak], Vec::new());
 
-        analyze(&mut result);
+        analyze(&mut result, &default_policy());
 
         assert!(result.certificates[0].findings.is_empty());
         assert_eq!(result.certificates[0].risk_score.value(), 0);
@@ -310,5 +384,23 @@ mod tests {
             [rules::WEAK_RSA]
         );
         assert_eq!(result.certificates[1].risk_score.value(), 25);
+    }
+
+    #[test]
+    fn analyze_applies_custom_expiration_thresholds() {
+        let now = Utc::now();
+        let cert = cert(now - Duration::days(10), now + Duration::days(60));
+        let mut result = ScanResult::new(vec![cert], Vec::new());
+
+        let policy = Policy {
+            warning_days: 90,
+            critical_days: 75,
+            ..default_policy()
+        };
+        analyze(&mut result, &policy);
+
+        assert_eq!(result.certificates[0].status, CertificateStatus::Critical);
+        assert_eq!(result.summary.critical, 1);
+        assert_eq!(result.summary.ok, 0);
     }
 }

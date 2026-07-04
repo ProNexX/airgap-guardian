@@ -57,7 +57,7 @@ fn run_scan(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitCode {
         Ok(result) => result,
         Err(e) => return report_failure(&e),
     };
-    analysis::analyze(&mut result);
+    analysis::analyze(&mut result, &policy::Policy::default());
 
     if json {
         if let Err(e) = report::json::print(&result) {
