@@ -2,7 +2,14 @@
 
 Airgap Guardian is an offline-first security tool for air-gapped environments. It runs as a single CLI executable with no network access required.
 
-It scans directories for X.509 certificates, reports their expiration status, and analyzes each certificate for common security issues (weak keys, disallowed signature algorithms, self-signed certificates, and more). Every certificate receives a risk score from 0 to 100. All security thresholds are driven by a configurable policy engine: pass a TOML policy file with `--policy`, or rely on built-in defaults. Results are available as a terminal table, JSON, or a standalone HTML report. The architecture is prepared for additional offline security scanners in the future.
+It scans directories with four scanners:
+
+* **cert** — X.509 certificates: expiration status and common security issues (weak keys, disallowed signature algorithms, self-signed certificates, and more)
+* **ssh** — SSH private keys (`id_rsa`, `id_ecdsa`, `id_ed25519`), `authorized_keys`, and `known_hosts`: weak RSA keys, unencrypted private keys, weak public key algorithms, duplicate keys
+* **secrets** — file contents matched against conservative regex rules: AWS access keys, GitHub tokens, PEM private key material, generic API keys, JWT strings
+* **jwt** — JWT tokens: structure and claims analysis (`alg`, `exp`, `iss`, `aud`) without signature verification, flagging `alg=none`, expired, and long-lived tokens
+
+Every certificate and asset receives a risk score from 0 to 100. All security thresholds are driven by a configurable policy engine: pass a TOML policy file with `--policy`, or rely on built-in defaults. Results are available as a terminal table, JSON, or a standalone HTML report.
 
 ## Installation
 
@@ -23,12 +30,13 @@ The binary is produced at `target/release/airgap-guardian`.
 ## Usage
 
 ```
-airgap-guardian scan <directory>                  # scan and print a table
-airgap-guardian scan <directory> --json           # scan and print JSON
-airgap-guardian scan <directory> --html <file>    # also write an HTML report
-airgap-guardian scan <directory> --policy <file>  # scan with a custom policy
-airgap-guardian version                           # print version
-airgap-guardian --help                            # show help
+airgap-guardian scan <directory>                    # scan and print a table
+airgap-guardian scan <directory> --json             # scan and print JSON
+airgap-guardian scan <directory> --html <file>      # also write an HTML report
+airgap-guardian scan <directory> --policy <file>    # scan with a custom policy
+airgap-guardian scan <directory> --scanners <list>  # run only selected scanners
+airgap-guardian version                             # print version
+airgap-guardian --help                              # show help
 ```
 
 Examples:
@@ -40,9 +48,10 @@ airgap-guardian scan ./certs --json
 airgap-guardian scan ./certs --html report.html
 airgap-guardian scan ./certs --policy policy.toml
 airgap-guardian scan ./certs --policy policy.toml --json --html report.html
+airgap-guardian scan /etc --scanners cert,ssh
 ```
 
-`--html` can be combined with either output mode; the confirmation message is printed to stderr so JSON on stdout stays clean.
+`--html` can be combined with either output mode; the confirmation message is printed to stderr so JSON on stdout stays clean. `--scanners` accepts a comma-separated subset of `cert`, `ssh`, `secrets`, `jwt`; all scanners run by default.
 
 ## Example Output
 
@@ -64,15 +73,32 @@ certs/vpn.crt
     - [Warning] Signature algorithm sha1WithRSAEncryption is not allowed by policy.
     - Expires in 2 days
 
+┌────────────────┬────────┬──────────────────────────────────────────┬──────┬──────────┐
+│ File           ┆ Type   ┆ Asset                                    ┆ Risk ┆ Findings │
+╞════════════════╪════════╪══════════════════════════════════════════╪══════╪══════════╡
+│ home/.ssh/id_rsa ┆ ssh  ┆ RSA private key (1024 bits), unencrypted ┆ 55   ┆ 2        │
+│ app/config.env ┆ secret ┆ AWS access key                           ┆ 40   ┆ 1        │
+└────────────────┴────────┴──────────────────────────────────────────┴──────┴──────────┘
+
+home/.ssh/id_rsa (ssh)
+  Asset: RSA private key (1024 bits), unencrypted
+  Risk: 55
+  Findings:
+    - [Critical] RSA key is only 1024 bits (policy requires at least 2048).
+    - [Warning] Private key is not protected by a passphrase.
+
 Certificates scanned: 4
 OK: 1
 Warning: 1
 Critical: 1
 Expired: 1
+Assets discovered: 2
+Asset warnings: 1
+Asset critical: 1
 Parse errors: 0
 ```
 
-After the table, a details section is printed for each certificate that has findings or a non-OK expiration status. Statuses are colored in the terminal: green (OK), yellow (Warning), red (Critical), bright red (Expired).
+After the certificate table, a details section is printed for each certificate that has findings or a non-OK expiration status. SSH keys, secrets, and JWT tokens follow in an asset table with their own findings sections. Statuses are colored in the terminal: green (OK), yellow (Warning), red (Critical), bright red (Expired). Secret matches are never printed in full; previews are redacted.
 
 With `--json`:
 
@@ -84,10 +110,14 @@ With `--json`:
     "warning": 1,
     "critical": 0,
     "expired": 0,
-    "parse_errors": 0
+    "parse_errors": 0,
+    "assets": 1,
+    "asset_warning": 0,
+    "asset_critical": 1
   },
   "certificates": [
     {
+      "asset_type": "cert",
       "path": "certs/ldap.crt",
       "subject": "CN=ldap.example.test",
       "issuer": "CN=Example Internal CA",
@@ -107,6 +137,27 @@ With `--json`:
           "severity": "Warning",
           "rule": "missing_san",
           "message": "Certificate has no Subject Alternative Name."
+        }
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "asset_type": "secret",
+      "path": "app/config.env",
+      "description": "AWS access key",
+      "details": {
+        "kind": "secret",
+        "rule": "aws_access_key",
+        "line": 2,
+        "preview": "AKIA****MPLE"
+      },
+      "risk_score": 40,
+      "findings": [
+        {
+          "severity": "Critical",
+          "rule": "aws_access_key",
+          "message": "AWS access key detected on line 2."
         }
       ]
     }
@@ -131,7 +182,7 @@ With `--json`:
 }
 ```
 
-The `policy` object always contains the effective values used for the scan, whether they came from a policy file or from the built-in defaults.
+The `policy` object always contains the effective values used for the scan, whether they came from a policy file or from the built-in defaults. Every entry carries an `asset_type` (`cert`, `ssh`, `secret`, or `jwt`); non-certificate assets appear in the `assets` array with type-specific `details`.
 
 ## Supported Certificate Formats
 
@@ -144,7 +195,27 @@ Files with the following extensions are scanned (case-insensitive):
 | `.cer`    | PEM or DER (detected automatically) |
 | `.der`    | DER |
 
-All other files are ignored. Files that cannot be parsed are reported as parse errors without aborting the scan.
+All other files are ignored by the certificate scanner. Files that cannot be parsed are reported as parse errors without aborting the scan.
+
+## Scanners
+
+All scanners share one directory walk; each file is read at most once and offered to every scanner that can process it. A failure in one file or scanner never aborts the scan.
+
+### SSH Scanner
+
+Processes files named `id_rsa`, `id_ecdsa`, `id_ed25519`, `authorized_keys`, and `known_hosts`.
+
+* Private keys: key type identification (OpenSSH and legacy PEM formats), RSA key size, and passphrase protection (format heuristics: OpenSSH cipher name, PEM `Proc-Type: 4,ENCRYPTED` headers)
+* `authorized_keys`: per-entry algorithm and key size, weak algorithms (`ssh-rsa`, `ssh-dss`), duplicate keys
+* `known_hosts`: basic parsing (entry count) only
+
+### Secrets Scanner
+
+Matches file contents against conservative regex rules: `aws_access_key`, `github_token`, `private_key`, `generic_api_key`, and `jwt_token`. Binary files (NUL-byte heuristic) and files larger than 1 MiB are skipped, as are SSH key files (owned by the SSH scanner). Matches are deduplicated per file and previews are redacted.
+
+### JWT Scanner
+
+Detects `header.payload.signature` structures, decodes header and payload (base64url), and extracts `alg`, `exp`, `iss`, and `aud`. Signatures are **not** verified. Strings that do not decode to valid JSON are silently ignored.
 
 ## Policy Engine
 
@@ -256,6 +327,23 @@ Each certificate is analyzed for common security issues. Findings are reported s
 | `long_validity` | valid for more than `max_certificate_lifetime_days` (398 days) | Warning |
 | `missing_san` | no Subject Alternative Name extension, if `required_subject_alternative_name = true` | Warning |
 
+Asset checks reuse the same policy thresholds:
+
+| Rule | Condition | Severity |
+|------|-----------|----------|
+| `ssh_weak_rsa` | SSH RSA key smaller than `min_rsa_key_size` | Critical |
+| `ssh_unencrypted_key` | SSH private key without passphrase protection | Warning |
+| `ssh_weak_algorithm` | `authorized_keys` entry uses `ssh-rsa` or `ssh-dss` | Warning |
+| `ssh_duplicate_key` | identical key appears more than once in `authorized_keys` | Warning |
+| `aws_access_key` | AWS access key ID detected | Critical |
+| `github_token` | GitHub token detected | Critical |
+| `private_key` | PEM private key material detected | Critical |
+| `generic_api_key` | generic API key assignment detected | Warning |
+| `jwt_token` | JWT string detected (cross-reference with the jwt scanner) | Warning |
+| `jwt_alg_none` | token uses `alg: none` | Critical |
+| `jwt_expired` | `exp` is in the past | Warning |
+| `jwt_long_lived` | `exp` is more than `max_certificate_lifetime_days` away | Warning |
+
 ## Risk Score
 
 Every certificate receives a risk score from 0 to 100, computed from its expiration status and findings:
@@ -272,11 +360,26 @@ Every certificate receives a risk score from 0 to 100, computed from its expirat
 | Missing SAN | +10 |
 | Long validity | +5 |
 
-The total is capped at 100. The score appears in the terminal table, the JSON output (`risk_score`), and the HTML report.
+Assets are scored from their findings alone:
+
+| Factor | Points |
+|--------|--------|
+| JWT `alg: none` | +60 |
+| Private key material found | +50 |
+| AWS access key / generic API key found | +40 |
+| GitHub token / JWT string found | +30 |
+| Unencrypted SSH private key | +30 |
+| Expired JWT | +30 |
+| Weak SSH RSA key | +25 |
+| Weak `authorized_keys` algorithm | +15 |
+| Long-lived JWT | +15 |
+| Duplicate `authorized_keys` entry | +10 |
+
+The total is capped at 100. The score appears in the terminal tables, the JSON output (`risk_score`), and the HTML report.
 
 ## HTML Report
 
-`--html <file>` writes a standalone, fully offline HTML report: a single file with embedded CSS, no JavaScript, and no external assets. It contains the scan summary, statistics cards, a "Scan Policy" section with the effective configuration, a color-coded certificate table with risk scores, a findings section for flagged certificates, parse errors, and the generation timestamp. Because the active policy is embedded, reports remain interpretable later without the original policy file.
+`--html <file>` writes a standalone, fully offline HTML report: a single file with embedded CSS, no JavaScript, and no external assets. It contains the scan summary, statistics cards, a "Scan Policy" section with the effective configuration, a color-coded certificate table with risk scores, a findings section for flagged certificates, asset and asset-findings sections for the other scanners, parse errors, and the generation timestamp. Because the active policy is embedded, reports remain interpretable later without the original policy file.
 
 ## Exit Codes
 
@@ -285,8 +388,8 @@ The highest severity encountered is returned.
 | Code | Meaning |
 |------|---------|
 | 0 | No warnings or errors |
-| 1 | Warnings present (including parse errors) |
-| 2 | Critical certificates found |
+| 1 | Warnings present (including parse errors and Warning-level asset findings) |
+| 2 | Critical certificates or Critical-level asset findings found |
 | 3 | Expired certificates found |
 | 4 | Invalid CLI usage |
 | 5 | Directory not found |
@@ -301,4 +404,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Sample certificates for tests live under `testdata/`.
+Sample certificates, SSH keys, and secret fixtures for tests live under `testdata/`.
