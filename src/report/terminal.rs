@@ -2,7 +2,7 @@ use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, Color, ContentArrangement, Table};
 use owo_colors::OwoColorize;
 
-use crate::models::{CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
+use crate::models::{AssetInfo, CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
 use crate::report::{expiration_note, has_issues};
 
 pub fn print(result: &ScanResult) {
@@ -12,6 +12,7 @@ pub fn print(result: &ScanResult) {
         println!("{}", build_table(&result.certificates));
     }
     print_findings(result);
+    print_assets(result);
     print_errors(result);
     print_summary(result);
 }
@@ -54,6 +55,46 @@ fn print_findings(result: &ScanResult) {
     }
 }
 
+fn print_assets(result: &ScanResult) {
+    if result.assets.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", build_asset_table(&result.assets));
+    for asset in result.assets.iter().filter(|a| !a.findings.is_empty()) {
+        println!();
+        println!("{} ({})", asset.path.bold(), asset.asset_type);
+        println!("  Asset: {}", asset.description);
+        println!("  Risk: {}", asset.risk_score);
+        println!("  Findings:");
+        for finding in &asset.findings {
+            println!(
+                "    - [{}] {}",
+                severity_label(finding.severity),
+                finding.message
+            );
+        }
+    }
+}
+
+fn build_asset_table(assets: &[AssetInfo]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["File", "Type", "Asset", "Risk", "Findings"]);
+    for asset in assets {
+        table.add_row(vec![
+            Cell::new(&asset.path),
+            Cell::new(asset.asset_type),
+            Cell::new(&asset.description),
+            Cell::new(asset.risk_score),
+            Cell::new(asset.findings.len()),
+        ]);
+    }
+    table
+}
+
 fn severity_label(severity: FindingSeverity) -> String {
     match severity {
         FindingSeverity::Info => severity.cyan().to_string(),
@@ -92,5 +133,8 @@ fn print_summary(result: &ScanResult) {
     println!("Warning: {}", s.warning);
     println!("Critical: {}", s.critical);
     println!("Expired: {}", s.expired);
+    println!("Assets discovered: {}", s.assets);
+    println!("Asset warnings: {}", s.asset_warning);
+    println!("Asset critical: {}", s.asset_critical);
     println!("Parse errors: {}", s.parse_errors);
 }

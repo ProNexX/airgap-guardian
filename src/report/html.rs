@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::models::{CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
+use crate::models::{AssetInfo, CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
 use crate::policy::Policy;
 use crate::report::{expiration_note, has_issues};
 
@@ -21,6 +21,8 @@ pub fn render(result: &ScanResult, policy: &Policy, generated_at: DateTime<Utc>)
     push_policy(&mut body, policy);
     push_certificate_table(&mut body, result);
     push_findings(&mut body, result);
+    push_asset_table(&mut body, result);
+    push_asset_findings(&mut body, result);
     push_errors(&mut body, result);
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -43,11 +45,14 @@ fn push_header(out: &mut String, generated_at: DateTime<Utc>) {
 fn push_summary_cards(out: &mut String, result: &ScanResult) {
     let s = &result.summary;
     let cards = [
-        ("Total", s.total, "total"),
+        ("Certificates", s.total, "total"),
         ("OK", s.ok, "ok"),
         ("Warning", s.warning, "warning"),
         ("Critical", s.critical, "critical"),
         ("Expired", s.expired, "expired"),
+        ("Assets", s.assets, "total"),
+        ("Asset warnings", s.asset_warning, "warning"),
+        ("Asset critical", s.asset_critical, "critical"),
         ("Parse errors", s.parse_errors, "error"),
     ];
     out.push_str("<section class=\"cards\">\n");
@@ -187,6 +192,71 @@ fn push_finding_card(out: &mut String, cert: &CertificateInfo) {
     out.push_str("</ul></article>\n");
 }
 
+fn push_asset_table(out: &mut String, result: &ScanResult) {
+    if result.assets.is_empty() {
+        return;
+    }
+    out.push_str(
+        "<section><h2>Assets</h2>\n<div class=\"table-wrap\"><table>\n\
+         <thead><tr><th>File</th><th>Type</th><th>Asset</th>\
+         <th>Risk</th><th>Findings</th></tr></thead>\n<tbody>\n",
+    );
+    for asset in &result.assets {
+        let row_class = if asset.findings.is_empty() {
+            ""
+        } else {
+            " class=\"flagged\""
+        };
+        let _ = writeln!(
+            out,
+            "<tr{row_class}><td>{path}</td><td>{asset_type}</td><td>{description}</td>\
+             <td><span class=\"risk risk-{risk_class}\">{risk}</span></td><td>{findings}</td></tr>",
+            path = escape(&asset.path),
+            asset_type = asset.asset_type,
+            description = escape(&asset.description),
+            risk_class = risk_class(asset.risk_score.value()),
+            risk = asset.risk_score,
+            findings = asset.findings.len(),
+        );
+    }
+    out.push_str("</tbody>\n</table></div></section>\n");
+}
+
+fn push_asset_findings(out: &mut String, result: &ScanResult) {
+    let flagged: Vec<&AssetInfo> = result
+        .assets
+        .iter()
+        .filter(|a| !a.findings.is_empty())
+        .collect();
+    if flagged.is_empty() {
+        return;
+    }
+    out.push_str("<section><h2>Asset Findings</h2>\n");
+    for asset in flagged {
+        let _ = write!(
+            out,
+            "<article class=\"finding-card\"><h3>{path}</h3>\
+             <p>{description} \
+             <span class=\"risk risk-{risk_class}\">Risk {risk}</span></p>\n<ul>\n",
+            path = escape(&asset.path),
+            description = escape(&asset.description),
+            risk_class = risk_class(asset.risk_score.value()),
+            risk = asset.risk_score,
+        );
+        for finding in &asset.findings {
+            let _ = writeln!(
+                out,
+                "<li><span class=\"badge badge-{class}\">{severity}</span> {message}</li>",
+                class = severity_class(finding.severity),
+                severity = finding.severity,
+                message = escape(&finding.message),
+            );
+        }
+        out.push_str("</ul></article>\n");
+    }
+    out.push_str("</section>\n");
+}
+
 fn push_errors(out: &mut String, result: &ScanResult) {
     if result.errors.is_empty() {
         return;
@@ -303,7 +373,7 @@ padding:1rem 1rem 1rem 2rem;margin:0}\
 mod tests {
     use super::*;
     use crate::analysis;
-    use crate::models::{ParseFailure, days_remaining};
+    use crate::models::{AssetDetails, AssetType, ParseFailure, days_remaining};
     use chrono::Duration;
 
     fn policy() -> Policy {
@@ -314,6 +384,7 @@ mod tests {
         let now = Utc::now();
         let not_after = now + Duration::days(2);
         let mut cert = CertificateInfo {
+            asset_type: AssetType::Cert,
             path: "certs/vpn.crt".into(),
             subject: "CN=vpn".into(),
             issuer: "CN=issuer".into(),
@@ -332,11 +403,25 @@ mod tests {
         };
         cert.findings = analysis::evaluate(&cert, &policy());
         cert.risk_score = analysis::risk_score(cert.status, &cert.findings);
+        let mut asset = AssetInfo {
+            asset_type: AssetType::Secret,
+            path: "config/app.env".into(),
+            description: "AWS access key".into(),
+            details: AssetDetails::Secret {
+                rule: analysis::rules::SECRET_AWS_ACCESS_KEY.into(),
+                line: 3,
+                preview: "AKIA****MPLE".into(),
+            },
+            risk_score: Default::default(),
+            findings: Vec::new(),
+        };
+        asset.findings = analysis::evaluate_asset(&asset, &policy(), now);
+        asset.risk_score = analysis::asset_risk_score(&asset.findings);
         let errors = vec![ParseFailure {
             path: "certs/bad.pem".into(),
             error: "invalid <PEM>".into(),
         }];
-        ScanResult::new(vec![cert], errors)
+        ScanResult::new(vec![cert], vec![asset], errors)
     }
 
     #[test]
@@ -361,6 +446,16 @@ mod tests {
         );
         assert!(html.contains("class=\"flagged\""));
         assert!(html.contains("Parse errors"));
+    }
+
+    #[test]
+    fn report_contains_assets_and_asset_findings() {
+        let html = render(&sample_result(), &policy(), Utc::now());
+        assert!(html.contains("<h2>Assets</h2>"));
+        assert!(html.contains("config/app.env"));
+        assert!(html.contains("AWS access key"));
+        assert!(html.contains("<h2>Asset Findings</h2>"));
+        assert!(html.contains("AWS access key detected on line 3."));
     }
 
     #[test]

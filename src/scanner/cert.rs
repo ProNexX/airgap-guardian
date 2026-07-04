@@ -1,9 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use walkdir::WalkDir;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::der_parser::Oid;
 use x509_parser::objects::{oid_registry, oid2sn};
@@ -12,73 +10,38 @@ use x509_parser::prelude::FromDer;
 use x509_parser::public_key::PublicKey;
 use x509_parser::time::ASN1Time;
 
-use crate::errors::ScanError;
-use crate::models::{
-    CertificateInfo, CertificateStatus, ParseFailure, RiskScore, ScanResult, days_remaining,
-};
-use crate::scanner::Scanner;
+use crate::models::{AssetType, CertificateInfo, CertificateStatus, RiskScore, days_remaining};
+use crate::scanner::{ScanItem, Scanner};
 
 const SUPPORTED_EXTENSIONS: [&str; 4] = ["pem", "crt", "cer", "der"];
 
 pub struct CertificateScanner {
-    root: PathBuf,
+    now: DateTime<Utc>,
 }
 
 impl CertificateScanner {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new() -> Self {
+        Self { now: Utc::now() }
     }
+}
 
-    fn validate_root(&self) -> Result<()> {
-        match fs::metadata(&self.root) {
-            Ok(meta) if meta.is_dir() => Ok(()),
-            Ok(_) => Err(ScanError::NotADirectory(self.root.clone()).into()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(ScanError::DirectoryNotFound(self.root.clone()).into())
-            }
-            Err(e) => Err(anyhow!(e).context(format!("cannot access {}", self.root.display()))),
-        }
+impl Default for CertificateScanner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Scanner for CertificateScanner {
-    fn scan(&self) -> Result<ScanResult> {
-        self.validate_root()?;
+    fn can_scan(&self, path: &Path, _size: u64) -> bool {
+        has_supported_extension(path)
+    }
 
-        let now = Utc::now();
-        let mut certificates = Vec::new();
-        let mut errors = Vec::new();
-
-        for entry in WalkDir::new(&self.root).follow_links(true) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    let path = e.path().map_or_else(
-                        || self.root.display().to_string(),
-                        |p| p.display().to_string(),
-                    );
-                    errors.push(ParseFailure {
-                        path,
-                        error: e.to_string(),
-                    });
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file() || !has_supported_extension(entry.path()) {
-                continue;
-            }
-            match process_file(entry.path(), now) {
-                Ok(mut certs) => certificates.append(&mut certs),
-                Err(e) => errors.push(ParseFailure {
-                    path: entry.path().display().to_string(),
-                    error: format!("{e:#}"),
-                }),
-            }
-        }
-
-        certificates.sort_by(|a, b| a.path.cmp(&b.path));
-        errors.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(ScanResult::new(certificates, errors))
+    fn scan_file(&self, path: &Path, data: &[u8]) -> Result<Vec<ScanItem>> {
+        let certificates = parse_certificates(path, data, self.now)?;
+        Ok(certificates
+            .into_iter()
+            .map(ScanItem::Certificate)
+            .collect())
     }
 }
 
@@ -90,11 +53,6 @@ fn has_supported_extension(path: &Path) -> bool {
                 .iter()
                 .any(|s| ext.eq_ignore_ascii_case(s))
         })
-}
-
-fn process_file(path: &Path, now: DateTime<Utc>) -> Result<Vec<CertificateInfo>> {
-    let data = fs::read(path).context("cannot read file")?;
-    parse_certificates(path, &data, now)
 }
 
 fn parse_certificates(
@@ -147,6 +105,7 @@ fn extract_info(
     let not_after = to_datetime(&cert.validity().not_after)?;
     let public_key = cert.public_key();
     Ok(CertificateInfo {
+        asset_type: AssetType::Cert,
         path: path.display().to_string(),
         subject: cert.subject().to_string(),
         issuer: cert.issuer().to_string(),
@@ -195,14 +154,11 @@ fn key_size_bits(cert: &X509Certificate) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn testdata() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata")
-    }
+    use crate::models::ScanResult;
+    use crate::scanner::{scan_directory, testdata_dir};
 
     fn scan_testdata() -> ScanResult {
-        CertificateScanner::new(testdata())
-            .scan()
+        scan_directory(&testdata_dir(), &[Box::new(CertificateScanner::new())])
             .expect("scan should succeed")
     }
 
@@ -234,13 +190,7 @@ mod tests {
     #[test]
     fn ignores_unsupported_extensions() {
         let result = scan_testdata();
-        assert!(
-            !result
-                .certificates
-                .iter()
-                .chain(result.certificates.iter())
-                .any(|c| c.path.ends_with(".txt"))
-        );
+        assert!(!result.certificates.iter().any(|c| c.path.ends_with(".txt")));
         assert!(!result.errors.iter().any(|e| e.path.ends_with(".txt")));
     }
 
@@ -267,17 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_directory_is_an_error() {
-        let err = CertificateScanner::new(testdata().join("does-not-exist"))
-            .scan()
-            .expect_err("scan should fail");
-        assert!(matches!(
-            err.downcast_ref::<ScanError>(),
-            Some(ScanError::DirectoryNotFound(_))
-        ));
-    }
-
-    #[test]
     fn extension_filter() {
         assert!(has_supported_extension(Path::new("a.pem")));
         assert!(has_supported_extension(Path::new("a.CRT")));
@@ -300,5 +239,6 @@ mod tests {
         assert_eq!(cert.key_size, Some(2048));
         assert_eq!(cert.status, CertificateStatus::Ok);
         assert!(cert.days_remaining > 30);
+        assert_eq!(cert.asset_type, AssetType::Cert);
     }
 }

@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn json_report_includes_policy_and_scan_fields() {
-        let result = ScanResult::new(Vec::new(), Vec::new());
+        let result = ScanResult::new(Vec::new(), Vec::new(), Vec::new());
         let policy = Policy::default();
         let report = JsonReport {
             result: &result,
@@ -34,8 +34,34 @@ mod tests {
         let value = serde_json::to_value(&report).unwrap();
         assert!(value.get("summary").is_some());
         assert!(value.get("certificates").is_some());
+        assert!(value.get("assets").is_some());
+        assert_eq!(value["summary"]["assets"], 0);
         assert_eq!(value["policy"]["warning_days"], 30);
         assert_eq!(value["policy"]["critical_days"], 7);
         assert_eq!(value["policy"]["min_rsa_key_size"], 2048);
+    }
+
+    #[test]
+    fn json_assets_carry_asset_type_tag() {
+        use crate::models::{AssetDetails, AssetInfo, AssetType, RiskScore};
+
+        let asset = AssetInfo {
+            asset_type: AssetType::Jwt,
+            path: "tokens.txt".into(),
+            description: "JWT (alg none)".into(),
+            details: AssetDetails::Jwt {
+                algorithm: "none".into(),
+                expires_at: None,
+                issuer: None,
+                audience: None,
+            },
+            risk_score: RiskScore::default(),
+            findings: Vec::new(),
+        };
+        let result = ScanResult::new(Vec::new(), vec![asset], Vec::new());
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["assets"][0]["asset_type"], "jwt");
+        assert_eq!(value["assets"][0]["details"]["kind"], "jwt");
+        assert_eq!(value["assets"][0]["details"]["algorithm"], "none");
     }
 }

@@ -12,12 +12,15 @@ use std::process::ExitCode;
 use clap::Parser;
 use clap::error::ErrorKind;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, ScannerKind};
 use errors::{PolicyError, ScanError};
 use models::ScanResult;
 use policy::Policy;
 use scanner::Scanner;
 use scanner::cert::CertificateScanner;
+use scanner::jwt::JwtScanner;
+use scanner::secrets::SecretsScanner;
+use scanner::ssh::SshScanner;
 
 const EXIT_OK: u8 = 0;
 const EXIT_WARNING: u8 = 1;
@@ -47,7 +50,8 @@ fn main() -> ExitCode {
             json,
             html,
             policy,
-        } => run_scan(directory, json, html, policy),
+            scanners,
+        } => run_scan(directory, json, html, policy, &scanners),
         Command::Version => {
             println!("airgap-guardian {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(EXIT_OK)
@@ -60,13 +64,15 @@ fn run_scan(
     json: bool,
     html: Option<PathBuf>,
     policy_file: Option<PathBuf>,
+    scanner_kinds: &[ScannerKind],
 ) -> ExitCode {
     let policy = match load_policy(policy_file.as_deref()) {
         Ok(policy) => policy,
         Err(e) => return report_failure(&e.into()),
     };
 
-    let mut result = match CertificateScanner::new(directory).scan() {
+    let scanners = build_scanners(scanner_kinds);
+    let mut result = match scanner::scan_directory(&directory, &scanners) {
         Ok(result) => result,
         Err(e) => return report_failure(&e),
     };
@@ -88,6 +94,25 @@ fn run_scan(
     }
 
     ExitCode::from(severity_exit_code(&result))
+}
+
+fn build_scanners(kinds: &[ScannerKind]) -> Vec<Box<dyn Scanner>> {
+    let kinds = if kinds.is_empty() {
+        &ScannerKind::ALL[..]
+    } else {
+        kinds
+    };
+    kinds
+        .iter()
+        .map(|kind| -> Box<dyn Scanner> {
+            match kind {
+                ScannerKind::Cert => Box::new(CertificateScanner::new()),
+                ScannerKind::Ssh => Box::new(SshScanner),
+                ScannerKind::Secrets => Box::new(SecretsScanner),
+                ScannerKind::Jwt => Box::new(JwtScanner),
+            }
+        })
+        .collect()
 }
 
 fn load_policy(path: Option<&std::path::Path>) -> Result<Policy, PolicyError> {
@@ -117,9 +142,9 @@ fn severity_exit_code(result: &ScanResult) -> u8 {
     let s = &result.summary;
     if s.expired > 0 {
         EXIT_EXPIRED
-    } else if s.critical > 0 {
+    } else if s.critical > 0 || s.asset_critical > 0 {
         EXIT_CRITICAL
-    } else if s.warning > 0 || s.parse_errors > 0 {
+    } else if s.warning > 0 || s.asset_warning > 0 || s.parse_errors > 0 {
         EXIT_WARNING
     } else {
         EXIT_OK

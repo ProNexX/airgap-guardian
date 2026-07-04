@@ -1,7 +1,8 @@
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::models::{
-    CertificateInfo, CertificateStatus, Finding, FindingSeverity, RiskScore, ScanResult,
+    AssetDetails, AssetInfo, CertificateInfo, CertificateStatus, Finding, FindingSeverity,
+    RiskScore, ScanResult, SshPublicKeyEntry,
 };
 use crate::policy::Policy;
 
@@ -12,6 +13,18 @@ pub mod rules {
     pub const INVALID_VALIDITY: &str = "invalid_validity";
     pub const LONG_VALIDITY: &str = "long_validity";
     pub const MISSING_SAN: &str = "missing_san";
+    pub const SSH_WEAK_RSA: &str = "ssh_weak_rsa";
+    pub const SSH_UNENCRYPTED_KEY: &str = "ssh_unencrypted_key";
+    pub const SSH_WEAK_ALGORITHM: &str = "ssh_weak_algorithm";
+    pub const SSH_DUPLICATE_KEY: &str = "ssh_duplicate_key";
+    pub const SECRET_AWS_ACCESS_KEY: &str = "aws_access_key";
+    pub const SECRET_GITHUB_TOKEN: &str = "github_token";
+    pub const SECRET_PRIVATE_KEY: &str = "private_key";
+    pub const SECRET_GENERIC_API_KEY: &str = "generic_api_key";
+    pub const SECRET_JWT_TOKEN: &str = "jwt_token";
+    pub const JWT_ALG_NONE: &str = "jwt_alg_none";
+    pub const JWT_EXPIRED: &str = "jwt_expired";
+    pub const JWT_LONG_LIVED: &str = "jwt_long_lived";
 }
 
 pub fn analyze(result: &mut ScanResult, policy: &Policy) {
@@ -25,6 +38,11 @@ pub fn analyze(result: &mut ScanResult, policy: &Policy) {
         );
         cert.findings = evaluate(cert, policy);
         cert.risk_score = risk_score(cert.status, &cert.findings);
+    }
+    for asset in &mut result.assets {
+        let findings = evaluate_asset(asset, policy, now);
+        asset.risk_score = asset_risk_score(&findings);
+        asset.findings = findings;
     }
     result.recompute_summary();
 }
@@ -65,8 +83,156 @@ fn rule_points(rule: &str) -> u32 {
         rules::INVALID_VALIDITY => 50,
         rules::LONG_VALIDITY => 5,
         rules::MISSING_SAN => 10,
+        rules::SSH_WEAK_RSA => 25,
+        rules::SSH_UNENCRYPTED_KEY => 30,
+        rules::SSH_WEAK_ALGORITHM => 15,
+        rules::SSH_DUPLICATE_KEY => 10,
+        rules::SECRET_AWS_ACCESS_KEY | rules::SECRET_GENERIC_API_KEY => 40,
+        rules::SECRET_PRIVATE_KEY => 50,
+        rules::SECRET_GITHUB_TOKEN | rules::SECRET_JWT_TOKEN => 30,
+        rules::JWT_ALG_NONE => 60,
+        rules::JWT_EXPIRED => 30,
+        rules::JWT_LONG_LIVED => 15,
         _ => 0,
     }
+}
+
+pub fn asset_risk_score(findings: &[Finding]) -> RiskScore {
+    RiskScore::from_points(findings.iter().map(|f| rule_points(&f.rule)).sum())
+}
+
+pub fn evaluate_asset(asset: &AssetInfo, policy: &Policy, now: DateTime<Utc>) -> Vec<Finding> {
+    match &asset.details {
+        AssetDetails::SshPrivateKey {
+            algorithm,
+            key_bits,
+            encrypted,
+        } => ssh_private_key_findings(algorithm, *key_bits, *encrypted, policy),
+        AssetDetails::SshAuthorizedKeys { keys } => authorized_keys_findings(keys, policy),
+        AssetDetails::SshKnownHosts { .. } => Vec::new(),
+        AssetDetails::Secret { rule, line, .. } => vec![Finding::new(
+            secret_severity(rule),
+            rule,
+            format!("{} detected on line {line}.", asset.description),
+        )],
+        AssetDetails::Jwt {
+            algorithm,
+            expires_at,
+            ..
+        } => jwt_findings(algorithm, *expires_at, policy, now),
+    }
+}
+
+fn ssh_private_key_findings(
+    algorithm: &str,
+    key_bits: Option<usize>,
+    encrypted: bool,
+    policy: &Policy,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if algorithm.eq_ignore_ascii_case("rsa")
+        && let Some(bits) = key_bits
+        && bits < policy.min_rsa_key_size
+    {
+        findings.push(Finding::new(
+            FindingSeverity::Critical,
+            rules::SSH_WEAK_RSA,
+            format!(
+                "RSA key is only {bits} bits (policy requires at least {}).",
+                policy.min_rsa_key_size
+            ),
+        ));
+    }
+    if !encrypted {
+        findings.push(Finding::new(
+            FindingSeverity::Warning,
+            rules::SSH_UNENCRYPTED_KEY,
+            "Private key is not protected by a passphrase.",
+        ));
+    }
+    findings
+}
+
+fn authorized_keys_findings(keys: &[SshPublicKeyEntry], policy: &Policy) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for key in keys {
+        if matches!(key.algorithm.as_str(), "ssh-rsa" | "ssh-dss") {
+            findings.push(Finding::new(
+                FindingSeverity::Warning,
+                rules::SSH_WEAK_ALGORITHM,
+                format!(
+                    "Key on line {} uses weak algorithm {}.",
+                    key.line, key.algorithm
+                ),
+            ));
+        }
+        if key.algorithm == "ssh-rsa"
+            && let Some(bits) = key.key_bits
+            && bits < policy.min_rsa_key_size
+        {
+            findings.push(Finding::new(
+                FindingSeverity::Critical,
+                rules::SSH_WEAK_RSA,
+                format!(
+                    "RSA key on line {} is only {bits} bits (policy requires at least {}).",
+                    key.line, policy.min_rsa_key_size
+                ),
+            ));
+        }
+        if let Some(original) = key.duplicate_of_line {
+            findings.push(Finding::new(
+                FindingSeverity::Warning,
+                rules::SSH_DUPLICATE_KEY,
+                format!("Key on line {} duplicates line {original}.", key.line),
+            ));
+        }
+    }
+    findings
+}
+
+fn secret_severity(rule: &str) -> FindingSeverity {
+    match rule {
+        rules::SECRET_AWS_ACCESS_KEY | rules::SECRET_GITHUB_TOKEN | rules::SECRET_PRIVATE_KEY => {
+            FindingSeverity::Critical
+        }
+        _ => FindingSeverity::Warning,
+    }
+}
+
+fn jwt_findings(
+    algorithm: &str,
+    expires_at: Option<DateTime<Utc>>,
+    policy: &Policy,
+    now: DateTime<Utc>,
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    if algorithm.eq_ignore_ascii_case("none") {
+        findings.push(Finding::new(
+            FindingSeverity::Critical,
+            rules::JWT_ALG_NONE,
+            "Token uses the \"none\" algorithm (no signature).",
+        ));
+    }
+    if let Some(expires_at) = expires_at {
+        if expires_at < now {
+            findings.push(Finding::new(
+                FindingSeverity::Warning,
+                rules::JWT_EXPIRED,
+                format!("Token expired {} days ago.", (now - expires_at).num_days()),
+            ));
+        } else if expires_at > now + Duration::days(policy.max_certificate_lifetime_days) {
+            findings.push(Finding::new(
+                FindingSeverity::Warning,
+                rules::JWT_LONG_LIVED,
+                format!(
+                    "Token is valid for {} more days (policy allows {}).",
+                    (expires_at - now).num_days(),
+                    policy.max_certificate_lifetime_days
+                ),
+            ));
+        }
+    }
+    findings
 }
 
 fn check_signature_algorithm(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
@@ -155,12 +321,13 @@ fn check_san(cert: &CertificateInfo, policy: &Policy) -> Option<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::days_remaining;
+    use crate::models::{AssetType, days_remaining};
     use chrono::{DateTime, Duration, Utc};
 
     fn cert(not_before: DateTime<Utc>, not_after: DateTime<Utc>) -> CertificateInfo {
         let now = Utc::now();
         CertificateInfo {
+            asset_type: AssetType::Cert,
             path: "test.pem".into(),
             subject: "CN=test".into(),
             issuer: "CN=issuer".into(),
@@ -373,7 +540,7 @@ mod tests {
     fn analyze_populates_findings_and_risk_score() {
         let mut weak = healthy_cert();
         weak.key_size = Some(1024);
-        let mut result = ScanResult::new(vec![healthy_cert(), weak], Vec::new());
+        let mut result = ScanResult::new(vec![healthy_cert(), weak], Vec::new(), Vec::new());
 
         analyze(&mut result, &default_policy());
 
@@ -390,7 +557,7 @@ mod tests {
     fn analyze_applies_custom_expiration_thresholds() {
         let now = Utc::now();
         let cert = cert(now - Duration::days(10), now + Duration::days(60));
-        let mut result = ScanResult::new(vec![cert], Vec::new());
+        let mut result = ScanResult::new(vec![cert], Vec::new(), Vec::new());
 
         let policy = Policy {
             warning_days: 90,
@@ -402,5 +569,162 @@ mod tests {
         assert_eq!(result.certificates[0].status, CertificateStatus::Critical);
         assert_eq!(result.summary.critical, 1);
         assert_eq!(result.summary.ok, 0);
+    }
+
+    fn asset(asset_type: AssetType, description: &str, details: AssetDetails) -> AssetInfo {
+        AssetInfo {
+            asset_type,
+            path: "some/file".into(),
+            description: description.into(),
+            details,
+            risk_score: RiskScore::default(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn evaluate_now(asset: &AssetInfo) -> Vec<Finding> {
+        evaluate_asset(asset, &default_policy(), Utc::now())
+    }
+
+    #[test]
+    fn flags_weak_unencrypted_ssh_private_key() {
+        let key = asset(
+            AssetType::Ssh,
+            "RSA private key",
+            AssetDetails::SshPrivateKey {
+                algorithm: "RSA".into(),
+                key_bits: Some(1024),
+                encrypted: false,
+            },
+        );
+        let findings = evaluate_now(&key);
+        assert_eq!(
+            rules_of(&findings),
+            [rules::SSH_WEAK_RSA, rules::SSH_UNENCRYPTED_KEY]
+        );
+        assert_eq!(asset_risk_score(&findings).value(), 55);
+
+        let strong = asset(
+            AssetType::Ssh,
+            "ED25519 private key",
+            AssetDetails::SshPrivateKey {
+                algorithm: "ED25519".into(),
+                key_bits: Some(256),
+                encrypted: true,
+            },
+        );
+        assert!(evaluate_now(&strong).is_empty());
+    }
+
+    #[test]
+    fn flags_weak_and_duplicate_authorized_keys() {
+        let entry = |line, algorithm: &str, key_bits, duplicate_of_line| SshPublicKeyEntry {
+            line,
+            algorithm: algorithm.into(),
+            key_bits,
+            comment: None,
+            duplicate_of_line,
+        };
+        let file = asset(
+            AssetType::Ssh,
+            "authorized_keys",
+            AssetDetails::SshAuthorizedKeys {
+                keys: vec![
+                    entry(1, "ssh-rsa", Some(1024), None),
+                    entry(2, "ssh-ed25519", Some(256), None),
+                    entry(3, "ssh-ed25519", Some(256), Some(2)),
+                ],
+            },
+        );
+        let findings = evaluate_now(&file);
+        assert_eq!(
+            rules_of(&findings),
+            [
+                rules::SSH_WEAK_ALGORITHM,
+                rules::SSH_WEAK_RSA,
+                rules::SSH_DUPLICATE_KEY
+            ]
+        );
+    }
+
+    #[test]
+    fn secret_severity_depends_on_rule() {
+        let secret = |rule: &str, description: &str| {
+            asset(
+                AssetType::Secret,
+                description,
+                AssetDetails::Secret {
+                    rule: rule.into(),
+                    line: 3,
+                    preview: "****".into(),
+                },
+            )
+        };
+        let aws = evaluate_now(&secret(rules::SECRET_AWS_ACCESS_KEY, "AWS access key"));
+        assert_eq!(aws[0].severity, FindingSeverity::Critical);
+        assert!(aws[0].message.contains("line 3"));
+        assert_eq!(asset_risk_score(&aws).value(), 40);
+
+        let generic = evaluate_now(&secret(rules::SECRET_GENERIC_API_KEY, "Generic API key"));
+        assert_eq!(generic[0].severity, FindingSeverity::Warning);
+
+        let key = evaluate_now(&secret(rules::SECRET_PRIVATE_KEY, "Private key material"));
+        assert_eq!(asset_risk_score(&key).value(), 50);
+    }
+
+    #[test]
+    fn flags_jwt_alg_none_expired_and_long_lived() {
+        let now = Utc::now();
+        let jwt = |algorithm: &str, expires_at| {
+            asset(
+                AssetType::Jwt,
+                "JWT",
+                AssetDetails::Jwt {
+                    algorithm: algorithm.into(),
+                    expires_at,
+                    issuer: None,
+                    audience: None,
+                },
+            )
+        };
+
+        let none = evaluate_now(&jwt("none", Some(now - Duration::days(5))));
+        assert_eq!(rules_of(&none), [rules::JWT_ALG_NONE, rules::JWT_EXPIRED]);
+        assert_eq!(none[0].severity, FindingSeverity::Critical);
+        assert_eq!(asset_risk_score(&none).value(), 90);
+
+        let policy = default_policy();
+        let long_lived = evaluate_now(&jwt(
+            "HS256",
+            Some(now + Duration::days(policy.max_certificate_lifetime_days + 10)),
+        ));
+        assert_eq!(rules_of(&long_lived), [rules::JWT_LONG_LIVED]);
+
+        let healthy = evaluate_now(&jwt("RS256", Some(now + Duration::days(30))));
+        assert!(healthy.is_empty());
+
+        let no_expiry = evaluate_now(&jwt("HS256", None));
+        assert!(no_expiry.is_empty());
+    }
+
+    #[test]
+    fn analyze_populates_asset_findings_and_summary() {
+        let secret = asset(
+            AssetType::Secret,
+            "AWS access key",
+            AssetDetails::Secret {
+                rule: rules::SECRET_AWS_ACCESS_KEY.into(),
+                line: 1,
+                preview: "****".into(),
+            },
+        );
+        let mut result = ScanResult::new(Vec::new(), vec![secret], Vec::new());
+
+        analyze(&mut result, &default_policy());
+
+        assert_eq!(result.assets[0].risk_score.value(), 40);
+        assert_eq!(result.summary.assets, 1);
+        assert_eq!(result.summary.asset_critical, 1);
+        assert_eq!(result.summary.asset_warning, 0);
     }
 }
