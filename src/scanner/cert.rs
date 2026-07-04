@@ -13,7 +13,9 @@ use x509_parser::public_key::PublicKey;
 use x509_parser::time::ASN1Time;
 
 use crate::errors::ScanError;
-use crate::models::{CertificateInfo, CertificateStatus, ParseFailure, ScanResult, days_remaining};
+use crate::models::{
+    CertificateInfo, CertificateStatus, ParseFailure, RiskScore, ScanResult, days_remaining,
+};
 use crate::scanner::Scanner;
 
 const SUPPORTED_EXTENSIONS: [&str; 4] = ["pem", "crt", "cer", "der"];
@@ -156,7 +158,16 @@ fn extract_info(
         signature_algorithm: oid_name(&cert.signature_algorithm.algorithm),
         public_key_algorithm: oid_name(&public_key.algorithm.algorithm),
         key_size: key_size_bits(cert),
+        is_ca: cert.is_ca(),
+        has_san: has_subject_alternative_name(cert),
+        risk_score: RiskScore::default(),
+        findings: Vec::new(),
     })
+}
+
+fn has_subject_alternative_name(cert: &X509Certificate) -> bool {
+    cert.subject_alternative_name()
+        .is_ok_and(|san| san.is_some())
 }
 
 fn to_datetime(time: &ASN1Time) -> Result<DateTime<Utc>> {

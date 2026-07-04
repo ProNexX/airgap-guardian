@@ -21,6 +21,9 @@ pub enum Command {
         /// Output results as JSON
         #[arg(long)]
         json: bool,
+        /// Write a standalone HTML report to the given file
+        #[arg(long, value_name = "FILE")]
+        html: Option<PathBuf>,
     },
     /// Print version information
     Version,

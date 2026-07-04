@@ -43,6 +43,63 @@ pub fn days_remaining(not_after: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
     (not_after - now).num_days()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FindingSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl fmt::Display for FindingSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Info => "Info",
+            Self::Warning => "Warning",
+            Self::Critical => "Critical",
+        };
+        f.write_str(label)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Finding {
+    pub severity: FindingSeverity,
+    pub rule: String,
+    pub message: String,
+}
+
+impl Finding {
+    pub fn new(severity: FindingSeverity, rule: &str, message: impl Into<String>) -> Self {
+        Self {
+            severity,
+            rule: rule.to_string(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct RiskScore(u8);
+
+impl RiskScore {
+    pub const MAX: u8 = 100;
+
+    pub fn from_points(points: u32) -> Self {
+        Self(points.min(u32::from(Self::MAX)) as u8)
+    }
+
+    pub fn value(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for RiskScore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CertificateInfo {
     pub path: String,
@@ -56,6 +113,10 @@ pub struct CertificateInfo {
     pub signature_algorithm: String,
     pub public_key_algorithm: String,
     pub key_size: Option<usize>,
+    pub is_ca: bool,
+    pub has_san: bool,
+    pub risk_score: RiskScore,
+    pub findings: Vec<Finding>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +216,13 @@ mod tests {
     }
 
     #[test]
+    fn risk_score_is_capped_at_100() {
+        assert_eq!(RiskScore::from_points(45).value(), 45);
+        assert_eq!(RiskScore::from_points(100).value(), 100);
+        assert_eq!(RiskScore::from_points(180).value(), 100);
+    }
+
+    #[test]
     fn summary_counts_by_status() {
         let now = now();
         let cert = |status, not_after: DateTime<Utc>| CertificateInfo {
@@ -169,6 +237,10 @@ mod tests {
             signature_algorithm: "sha256WithRSAEncryption".into(),
             public_key_algorithm: "rsaEncryption".into(),
             key_size: Some(2048),
+            is_ca: false,
+            has_san: true,
+            risk_score: RiskScore::default(),
+            findings: Vec::new(),
         };
         let certificates = vec![
             cert(CertificateStatus::Ok, now + Duration::days(100)),

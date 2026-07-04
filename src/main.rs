@@ -1,3 +1,4 @@
+mod analysis;
 mod cli;
 mod errors;
 mod models;
@@ -38,7 +39,11 @@ fn main() -> ExitCode {
     };
 
     match cli.command {
-        Command::Scan { directory, json } => run_scan(directory, json),
+        Command::Scan {
+            directory,
+            json,
+            html,
+        } => run_scan(directory, json, html),
         Command::Version => {
             println!("airgap-guardian {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(EXIT_OK)
@@ -46,11 +51,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_scan(directory: PathBuf, json: bool) -> ExitCode {
-    let result = match CertificateScanner::new(directory).scan() {
+fn run_scan(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitCode {
+    let mut result = match CertificateScanner::new(directory).scan() {
         Ok(result) => result,
         Err(e) => return report_failure(&e),
     };
+    analysis::analyze(&mut result);
 
     if json {
         if let Err(e) = report::json::print(&result) {
@@ -58,6 +64,13 @@ fn run_scan(directory: PathBuf, json: bool) -> ExitCode {
         }
     } else {
         report::terminal::print(&result);
+    }
+
+    if let Some(path) = html {
+        if let Err(e) = report::html::write(&result, &path) {
+            return report_failure(&e);
+        }
+        eprintln!("HTML report written to {}", path.display());
     }
 
     ExitCode::from(severity_exit_code(&result))
