@@ -6,17 +6,19 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::models::{CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
+use crate::policy::Policy;
 use crate::report::{expiration_note, has_issues};
 
-pub fn write(result: &ScanResult, path: &Path) -> Result<()> {
-    let html = render(result, Utc::now());
+pub fn write(result: &ScanResult, policy: &Policy, path: &Path) -> Result<()> {
+    let html = render(result, policy, Utc::now());
     fs::write(path, html).with_context(|| format!("cannot write HTML report to {}", path.display()))
 }
 
-pub fn render(result: &ScanResult, generated_at: DateTime<Utc>) -> String {
+pub fn render(result: &ScanResult, policy: &Policy, generated_at: DateTime<Utc>) -> String {
     let mut body = String::new();
     push_header(&mut body, generated_at);
     push_summary_cards(&mut body, result);
+    push_policy(&mut body, policy);
     push_certificate_table(&mut body, result);
     push_findings(&mut body, result);
     push_errors(&mut body, result);
@@ -57,6 +59,45 @@ fn push_summary_cards(out: &mut String, result: &ScanResult) {
         );
     }
     out.push_str("</section>\n");
+}
+
+fn push_policy(out: &mut String, policy: &Policy) {
+    let yes_no = |flag: bool| if flag { "yes" } else { "no" };
+    let algorithms = policy
+        .allowed_signature_algorithms
+        .iter()
+        .map(|a| format!("<code>{}</code>", escape(a)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rows = [
+        ("Warning threshold", format!("{} days", policy.warning_days)),
+        (
+            "Critical threshold",
+            format!("{} days", policy.critical_days),
+        ),
+        (
+            "Minimum RSA key size",
+            format!("{} bits", policy.min_rsa_key_size),
+        ),
+        (
+            "Maximum certificate lifetime",
+            format!("{} days", policy.max_certificate_lifetime_days),
+        ),
+        (
+            "Allow self-signed",
+            yes_no(policy.allow_self_signed).to_string(),
+        ),
+        (
+            "Require Subject Alternative Name",
+            yes_no(policy.required_subject_alternative_name).to_string(),
+        ),
+        ("Allowed signature algorithms", algorithms),
+    ];
+    out.push_str("<section><h2>Scan Policy</h2>\n<div class=\"table-wrap\"><table class=\"policy\">\n<tbody>\n");
+    for (label, value) in rows {
+        let _ = writeln!(out, "<tr><th>{label}</th><td>{value}</td></tr>");
+    }
+    out.push_str("</tbody>\n</table></div></section>\n");
 }
 
 fn push_certificate_table(out: &mut String, result: &ScanResult) {
@@ -231,6 +272,10 @@ white-space:nowrap}\
 td:first-child{white-space:normal;word-break:break-all}\
 tbody tr:last-child td{border-bottom:none}\
 tr.flagged{background:var(--warning-bg)}\
+table.policy th{width:16rem;color:var(--muted);font-weight:600;vertical-align:top}\
+table.policy td{white-space:normal}\
+code{background:var(--bg);border:1px solid var(--border);border-radius:4px;\
+padding:.05rem .35rem;font-size:.85em}\
 .badge{display:inline-block;padding:.1rem .55rem;border-radius:999px;font-size:.78rem;\
 font-weight:600}\
 .badge-ok{background:var(--ok-bg);color:var(--ok)}\
@@ -261,6 +306,10 @@ mod tests {
     use crate::models::{ParseFailure, days_remaining};
     use chrono::Duration;
 
+    fn policy() -> Policy {
+        Policy::default()
+    }
+
     fn sample_result() -> ScanResult {
         let now = Utc::now();
         let not_after = now + Duration::days(2);
@@ -281,7 +330,7 @@ mod tests {
             risk_score: Default::default(),
             findings: Vec::new(),
         };
-        cert.findings = analysis::evaluate(&cert, &crate::policy::Policy::default());
+        cert.findings = analysis::evaluate(&cert, &policy());
         cert.risk_score = analysis::risk_score(cert.status, &cert.findings);
         let errors = vec![ParseFailure {
             path: "certs/bad.pem".into(),
@@ -292,7 +341,7 @@ mod tests {
 
     #[test]
     fn renders_standalone_report() {
-        let html = render(&sample_result(), Utc::now());
+        let html = render(&sample_result(), &policy(), Utc::now());
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("<style>"));
         assert!(!html.contains("<script"));
@@ -302,7 +351,7 @@ mod tests {
 
     #[test]
     fn report_contains_summary_certificates_and_findings() {
-        let html = render(&sample_result(), Utc::now());
+        let html = render(&sample_result(), &policy(), Utc::now());
         assert!(html.contains("certs/vpn.crt"));
         assert!(html.contains("badge-critical"));
         assert!(html.contains(">85<") || html.contains("Risk 85"));
@@ -315,17 +364,32 @@ mod tests {
     }
 
     #[test]
+    fn report_shows_scan_policy_section() {
+        let custom = Policy {
+            warning_days: 60,
+            min_rsa_key_size: 4096,
+            ..Policy::default()
+        };
+        let html = render(&sample_result(), &custom, Utc::now());
+        assert!(html.contains("Scan Policy"));
+        assert!(html.contains("60 days"));
+        assert!(html.contains("4096 bits"));
+        assert!(html.contains("<code>sha256WithRSAEncryption</code>"));
+        assert!(html.contains("Require Subject Alternative Name"));
+    }
+
+    #[test]
     fn report_includes_generation_timestamp() {
         let generated_at = DateTime::parse_from_rfc3339("2026-07-04T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let html = render(&sample_result(), generated_at);
+        let html = render(&sample_result(), &policy(), generated_at);
         assert!(html.contains("2026-07-04 10:30:00 UTC"));
     }
 
     #[test]
     fn escapes_html_in_untrusted_fields() {
-        let html = render(&sample_result(), Utc::now());
+        let html = render(&sample_result(), &policy(), Utc::now());
         assert!(html.contains("invalid &lt;PEM&gt;"));
         assert_eq!(escape("a<b>&\"'"), "a&lt;b&gt;&amp;&quot;&#39;");
     }
@@ -335,7 +399,7 @@ mod tests {
         let dir = std::env::temp_dir().join("airgap-guardian-html-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("report.html");
-        write(&sample_result(), &path).unwrap();
+        write(&sample_result(), &policy(), &path).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("Airgap Guardian"));
         std::fs::remove_dir_all(&dir).unwrap();

@@ -73,7 +73,7 @@ fn run_scan(
     analysis::analyze(&mut result, &policy);
 
     if json {
-        if let Err(e) = report::json::print(&result) {
+        if let Err(e) = report::json::print(&result, &policy) {
             return report_failure(&e);
         }
     } else {
@@ -81,7 +81,7 @@ fn run_scan(
     }
 
     if let Some(path) = html {
-        if let Err(e) = report::html::write(&result, &path) {
+        if let Err(e) = report::html::write(&result, &policy, &path) {
             return report_failure(&e);
         }
         eprintln!("HTML report written to {}", path.display());
