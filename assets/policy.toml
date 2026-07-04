@@ -1,0 +1,19 @@
+warning_days = 30
+critical_days = 7
+
+min_rsa_key_size = 2048
+
+max_certificate_lifetime_days = 398
+
+allow_self_signed = false
+
+required_subject_alternative_name = true
+
+allowed_signature_algorithms = [
+    "sha256WithRSAEncryption",
+    "sha384WithRSAEncryption",
+    "sha512WithRSAEncryption",
+    "ecdsa-with-SHA256",
+    "ecdsa-with-SHA384",
+    "ecdsa-with-SHA512"
+]
