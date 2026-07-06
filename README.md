@@ -37,6 +37,7 @@ airgap-guardian scan <directory> --json             # scan and print JSON
 airgap-guardian scan <directory> --html <file>      # also write an HTML report
 airgap-guardian scan <directory> --policy <file>    # scan with a custom policy
 airgap-guardian scan <directory> --scanners <list>  # run only selected scanners
+airgap-guardian scan --inventory <file>             # scan the targets listed in an inventory file
 airgap-guardian discover <directory>                # locate scan targets, write inventory.toml
 airgap-guardian inventory <directory>               # catalog every security asset
 airgap-guardian version                             # print version
@@ -53,9 +54,13 @@ airgap-guardian scan ./certs --html report.html
 airgap-guardian scan ./certs --policy policy.toml
 airgap-guardian scan ./certs --policy policy.toml --json --html report.html
 airgap-guardian scan /etc --scanners cert,ssh
+airgap-guardian scan --inventory inventory.toml
+airgap-guardian scan -i inventory.toml --json --html report.html --policy policy.toml
 ```
 
 `--html` can be combined with either output mode; the confirmation message is printed to stderr so JSON on stdout stays clean. `--scanners` accepts a comma-separated subset of `cert`, `ssh`, `secrets`, `jwt`; all scanners run by default.
+
+`scan` takes exactly one input: a positional directory or `--inventory`/`-i` with an inventory file. Supplying both, or neither, is a usage error. `--scanners` cannot be combined with `--inventory` (the inventory specifies scanners per target).
 
 ## Example Output
 
@@ -234,6 +239,36 @@ scanners = ["ssh"]
 ```
 
 With `--json` the same targets are printed as `{"version": 1, "targets": [{"path": ..., "scanners": [...]}]}`; the inventory file is written either way, and the confirmation message goes to stderr so stdout stays clean.
+
+## Scanning from an Inventory
+
+`scan --inventory <file>` (or `-i`) scans every target listed in an inventory file, running only the scanners configured for each target and merging everything into a single report:
+
+```
+airgap-guardian scan --inventory inventory.toml
+airgap-guardian scan -i inventory.toml --json
+airgap-guardian scan -i inventory.toml --html report.html --policy policy.toml
+```
+
+Entries referencing the same path are merged and their scanner lists combined, so each unique directory is walked exactly once. A target directory that does not exist is recorded as a parse error and the scan continues with the remaining targets. Output, policies, exit codes, and reports behave exactly as for a directory scan; the only additions are an informational header in terminal mode:
+
+```
+Loaded inventory: inventory.toml
+Targets: 12
+```
+
+an `inventory` object in JSON output:
+
+```json
+"inventory": {
+  "source": "inventory.toml",
+  "targets": 12
+}
+```
+
+and an "Inventory" section in the HTML report listing the source file and every scan target with its scanners.
+
+An inventory is rejected (exit code 7) when: the TOML is invalid, `version` is missing or unsupported (current version: 1), there are no scan entries, an entry is missing `path` or `scanners`, a scanner list is empty, a scanner name is unknown (valid: `cert`, `ssh`, `secret`, `jwt`), two entries have an identical path and scanner list, or unknown fields are present. All validation violations are reported in a single message.
 
 ## Asset Inventory
 
@@ -502,7 +537,7 @@ For `scan`, the highest severity encountered is returned. `discover` and `invent
 | 4 | Invalid CLI usage |
 | 5 | Directory not found |
 | 6 | Unexpected runtime error |
-| 7 | Invalid or unreadable policy file |
+| 7 | Invalid or unreadable policy or inventory file |
 
 ## Development
 
