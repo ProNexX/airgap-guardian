@@ -1,19 +1,48 @@
 # Airgap Guardian
 
-Airgap Guardian is an offline-first security tool for air-gapped environments. It runs as a single CLI executable with no network access required.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ProNexX/airgap-guardian?include_prereleases&label=release)](https://github.com/ProNexX/airgap-guardian/releases)
 
-It scans directories with four scanners:
+Audit **X.509 certificates**, **SSH keys**, **secrets**, and **JWTs** on air-gapped systems — no network, no SaaS. A single Rust binary with policy-driven risk scoring and table, JSON, or offline HTML reports.
 
-* **cert** — X.509 certificates: expiration status and common security issues (weak keys, disallowed signature algorithms, self-signed certificates, and more)
-* **ssh** — SSH private keys (`id_rsa`, `id_ecdsa`, `id_ed25519`), `authorized_keys`, and `known_hosts`: weak RSA keys, unencrypted private keys, weak public key algorithms, duplicate keys
-* **secrets** — file contents matched against conservative regex rules: AWS access keys, GitHub tokens, PEM private key material, generic API keys, JWT strings
-* **jwt** — JWT tokens: structure and claims analysis (`alg`, `exp`, `iss`, `aud`) without signature verification, flagging `alg=none`, expired, and long-lived tokens
+## Why Airgap Guardian?
 
-Every certificate and asset receives a risk score from 0 to 100. All security thresholds are driven by a configurable policy engine: pass a TOML policy file with `--policy`, or rely on built-in defaults. Results are available as a terminal table, JSON, or a standalone HTML report.
+Most security scanners assume outbound network access, cloud APIs, or a narrow focus on one asset type. Airgap Guardian is built for isolated environments where you still need to audit local crypto material and credential exposure.
 
-Beyond `scan`, the `discover` command quickly locates likely asset locations and writes a reusable `inventory.toml`, and the `inventory` command catalogs every discovered asset in full detail.
+| | Airgap Guardian | Secret scanners (Gitleaks, TruffleHog) | Certificate tools |
+|---|---|---|---|
+| Fully offline | Yes | Often needs updates or remote rules | Varies |
+| Certs + SSH + secrets + JWT | Yes | Secrets / repos | Certificates |
+| Configurable policy | TOML policy file | Tool-specific | Tool-specific |
+| Standalone HTML report | Yes, no JS or CDN | Varies | Varies |
+| Inventory workflow | `discover` → `scan` | — | — |
+
+## Quick Start
+
+```bash
+# Pre-built binary (see Releases)
+curl -LO https://github.com/ProNexX/airgap-guardian/releases/download/v0.1.0-alpha.1/airgap-guardian
+chmod +x airgap-guardian
+
+./airgap-guardian scan ./testdata
+./airgap-guardian discover /etc --output inventory.toml
+./airgap-guardian scan -i inventory.toml --json --html report.html
+```
+
+Or build from source:
+
+```bash
+cargo install --path .
+airgap-guardian scan ./testdata
+```
 
 ## Installation
+
+### Pre-built binary
+
+Download from [Releases](https://github.com/ProNexX/airgap-guardian/releases). Current alpha ships a Linux x86_64 binary; additional platforms will follow.
+
+### From source
 
 Requires a stable Rust toolchain (https://rustup.rs).
 
@@ -21,13 +50,48 @@ Requires a stable Rust toolchain (https://rustup.rs).
 cargo install --path .
 ```
 
-## Build
+### Build
 
 ```
 cargo build --release
 ```
 
 The binary is produced at `target/release/airgap-guardian`.
+
+### Container
+
+Offline image build (vendor dependencies once on a connected machine):
+
+```bash
+cargo vendor vendor
+podman build --network=none -t airgap-guardian .
+podman run --rm airgap-guardian
+```
+
+Scan a host directory by mounting it into `/work`:
+
+```bash
+podman run --rm -v /path/to/certs:/work/certs:ro airgap-guardian scan /work/certs
+```
+
+## What It Scans
+
+Four scanners share a single directory walk:
+
+* **cert** — X.509 certificates: expiration status and common security issues (weak keys, disallowed signature algorithms, self-signed certificates, and more)
+* **ssh** — SSH private keys (`id_rsa`, `id_ecdsa`, `id_ed25519`), `authorized_keys`, and `known_hosts`: weak RSA keys, unencrypted private keys, weak public key algorithms, duplicate keys
+* **secrets** — file contents matched against conservative regex rules: AWS access keys, GitHub tokens, PEM private key material, generic API keys, JWT strings
+* **jwt** — JWT tokens: structure and claims analysis (`alg`, `exp`, `iss`, `aud`) without signature verification, flagging `alg=none`, expired, and long-lived tokens
+
+Every certificate and asset receives a risk score from 0 to 100. All security thresholds are driven by a configurable policy engine: pass a TOML policy file with `--policy`, or rely on built-in defaults.
+
+Beyond `scan`, the `discover` command quickly locates likely asset locations and writes a reusable `inventory.toml`, and the `inventory` command catalogs every discovered asset in full detail.
+
+## Screenshots
+
+Terminal output from `airgap-guardian scan testdata` — see [Example Output](#example-output) below.
+
+Sample offline HTML report: open [`assets/test.html`](assets/test.html) in a browser to preview the report format (no JavaScript, no external assets).
 
 ## Usage
 
@@ -538,6 +602,14 @@ For `scan`, the highest severity encountered is returned. `discover` and `invent
 | 5 | Directory not found |
 | 6 | Unexpected runtime error |
 | 7 | Invalid or unreadable policy or inventory file |
+
+## Feedback
+
+This project is in **alpha**. API and CLI flags may change before 1.0. Heuristic secret and JWT detection may produce false positives or misses; JWT analysis is structural only (signatures are not verified).
+
+* [Releases](https://github.com/ProNexX/airgap-guardian/releases) — pre-built binaries and changelog
+* [Discussions](https://github.com/ProNexX/airgap-guardian/discussions) — questions, ideas, and feedback
+* [Issues](https://github.com/ProNexX/airgap-guardian/issues) — bugs and reproducible problems
 
 ## Development
 
