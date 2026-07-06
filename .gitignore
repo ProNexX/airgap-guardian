@@ -1,4 +1,5 @@
 /target
+/vendor
 CLAUDE.local.md
 .claude
 /graphify-out
