@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use walkdir::WalkDir;
 
 use crate::errors::ScanError;
-use crate::models::{AssetInfo, CertificateInfo, ParseFailure, ScanResult};
+use crate::models::{AssetInfo, AssetType, CertificateInfo, ParseFailure, ScanResult};
 
 pub enum ScanItem {
     Certificate(CertificateInfo),
@@ -20,6 +20,20 @@ pub enum ScanItem {
 pub trait Scanner {
     fn can_scan(&self, path: &Path, size: u64) -> bool;
     fn scan_file(&self, path: &Path, data: &[u8]) -> Result<Vec<ScanItem>>;
+}
+
+pub fn build_scanners(kinds: impl IntoIterator<Item = AssetType>) -> Vec<Box<dyn Scanner>> {
+    kinds
+        .into_iter()
+        .map(|kind| -> Box<dyn Scanner> {
+            match kind {
+                AssetType::Cert => Box::new(cert::CertificateScanner::new()),
+                AssetType::Ssh => Box::new(ssh::SshScanner),
+                AssetType::Secret => Box::new(secrets::SecretsScanner),
+                AssetType::Jwt => Box::new(jwt::JwtScanner),
+            }
+        })
+        .collect()
 }
 
 pub fn scan_directory(root: &Path, scanners: &[Box<dyn Scanner>]) -> Result<ScanResult> {

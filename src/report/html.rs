@@ -5,19 +5,33 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
+use crate::inventory::Inventory;
 use crate::models::{AssetInfo, CertificateInfo, CertificateStatus, FindingSeverity, ScanResult};
 use crate::policy::Policy;
 use crate::report::{expiration_note, has_issues};
 
-pub fn write(result: &ScanResult, policy: &Policy, path: &Path) -> Result<()> {
-    let html = render(result, policy, Utc::now());
+pub fn write(
+    result: &ScanResult,
+    policy: &Policy,
+    inventory: Option<&Inventory>,
+    path: &Path,
+) -> Result<()> {
+    let html = render(result, policy, inventory, Utc::now());
     fs::write(path, html).with_context(|| format!("cannot write HTML report to {}", path.display()))
 }
 
-pub fn render(result: &ScanResult, policy: &Policy, generated_at: DateTime<Utc>) -> String {
+pub fn render(
+    result: &ScanResult,
+    policy: &Policy,
+    inventory: Option<&Inventory>,
+    generated_at: DateTime<Utc>,
+) -> String {
     let mut body = String::new();
     push_header(&mut body, generated_at);
     push_summary_cards(&mut body, result);
+    if let Some(inventory) = inventory {
+        push_inventory(&mut body, inventory);
+    }
     push_policy(&mut body, policy);
     push_certificate_table(&mut body, result);
     push_findings(&mut body, result);
@@ -64,6 +78,31 @@ fn push_summary_cards(out: &mut String, result: &ScanResult) {
         );
     }
     out.push_str("</section>\n");
+}
+
+fn push_inventory(out: &mut String, inventory: &Inventory) {
+    let _ = writeln!(
+        out,
+        "<section><h2>Inventory</h2>\n\
+         <p>Source: <code>{source}</code> &middot; {count} scan targets</p>\n\
+         <div class=\"table-wrap\"><table>\n\
+         <thead><tr><th>Path</th><th>Scanners</th></tr></thead>\n<tbody>",
+        source = escape(&inventory.source().display().to_string()),
+        count = inventory.target_count(),
+    );
+    for (path, kinds) in inventory.targets() {
+        let scanners = kinds
+            .iter()
+            .map(|kind| format!("<code>{kind}</code>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "<tr><td>{path}</td><td>{scanners}</td></tr>",
+            path = escape(&path.display().to_string()),
+        );
+    }
+    out.push_str("</tbody>\n</table></div></section>\n");
 }
 
 fn push_policy(out: &mut String, policy: &Policy) {
@@ -427,7 +466,7 @@ mod tests {
 
     #[test]
     fn renders_standalone_report() {
-        let html = render(&sample_result(), &policy(), Utc::now());
+        let html = render(&sample_result(), &policy(), None, Utc::now());
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("<style>"));
         assert!(!html.contains("<script"));
@@ -437,7 +476,7 @@ mod tests {
 
     #[test]
     fn report_contains_summary_certificates_and_findings() {
-        let html = render(&sample_result(), &policy(), Utc::now());
+        let html = render(&sample_result(), &policy(), None, Utc::now());
         assert!(html.contains("certs/vpn.crt"));
         assert!(html.contains("badge-critical"));
         assert!(html.contains(">85<") || html.contains("Risk 85"));
@@ -451,7 +490,7 @@ mod tests {
 
     #[test]
     fn report_contains_assets_and_asset_findings() {
-        let html = render(&sample_result(), &policy(), Utc::now());
+        let html = render(&sample_result(), &policy(), None, Utc::now());
         assert!(html.contains("<h2>Assets</h2>"));
         assert!(html.contains("config/app.env"));
         assert!(html.contains("AWS access key"));
@@ -466,7 +505,7 @@ mod tests {
             min_rsa_key_size: 4096,
             ..Policy::default()
         };
-        let html = render(&sample_result(), &custom, Utc::now());
+        let html = render(&sample_result(), &custom, None, Utc::now());
         assert!(html.contains("Scan Policy"));
         assert!(html.contains("60 days"));
         assert!(html.contains("4096 bits"));
@@ -475,17 +514,35 @@ mod tests {
     }
 
     #[test]
+    fn report_includes_inventory_section_when_present() {
+        let inventory = Inventory::parse(
+            Path::new("inventory.toml"),
+            "version = 1\n[[scan]]\npath = \"/etc/ssl\"\nscanners = [\"cert\", \"ssh\"]\n",
+        )
+        .unwrap();
+        let html = render(&sample_result(), &policy(), Some(&inventory), Utc::now());
+        assert!(html.contains("<h2>Inventory</h2>"));
+        assert!(html.contains("<code>inventory.toml</code>"));
+        assert!(html.contains("1 scan targets"));
+        assert!(html.contains("/etc/ssl"));
+        assert!(html.contains("<code>cert</code>, <code>ssh</code>"));
+
+        let without = render(&sample_result(), &policy(), None, Utc::now());
+        assert!(!without.contains("<h2>Inventory</h2>"));
+    }
+
+    #[test]
     fn report_includes_generation_timestamp() {
         let generated_at = DateTime::parse_from_rfc3339("2026-07-04T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let html = render(&sample_result(), &policy(), generated_at);
+        let html = render(&sample_result(), &policy(), None, generated_at);
         assert!(html.contains("2026-07-04 10:30:00 UTC"));
     }
 
     #[test]
     fn escapes_html_in_untrusted_fields() {
-        let html = render(&sample_result(), &policy(), Utc::now());
+        let html = render(&sample_result(), &policy(), None, Utc::now());
         assert!(html.contains("invalid &lt;PEM&gt;"));
         assert_eq!(escape("a<b>&\"'"), "a&lt;b&gt;&amp;&quot;&#39;");
     }
@@ -495,7 +552,7 @@ mod tests {
         let dir = std::env::temp_dir().join("airgap-guardian-html-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("report.html");
-        write(&sample_result(), &policy(), &path).unwrap();
+        write(&sample_result(), &policy(), None, &path).unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("Airgap Guardian"));
         std::fs::remove_dir_all(&dir).unwrap();

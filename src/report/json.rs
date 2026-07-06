@@ -1,18 +1,40 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::inventory::Inventory;
 use crate::models::ScanResult;
 use crate::policy::Policy;
+
+#[derive(Serialize)]
+struct InventoryInfo {
+    source: String,
+    targets: usize,
+}
+
+impl InventoryInfo {
+    fn new(inventory: &Inventory) -> Self {
+        Self {
+            source: inventory.source().display().to_string(),
+            targets: inventory.target_count(),
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
     #[serde(flatten)]
     result: &'a ScanResult,
     policy: &'a Policy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inventory: Option<InventoryInfo>,
 }
 
-pub fn print(result: &ScanResult, policy: &Policy) -> Result<()> {
-    let report = JsonReport { result, policy };
+pub fn print(result: &ScanResult, policy: &Policy, inventory: Option<&Inventory>) -> Result<()> {
+    let report = JsonReport {
+        result,
+        policy,
+        inventory: inventory.map(InventoryInfo::new),
+    };
     let output =
         serde_json::to_string_pretty(&report).context("failed to serialize scan result")?;
     println!("{output}");
@@ -30,6 +52,7 @@ mod tests {
         let report = JsonReport {
             result: &result,
             policy: &policy,
+            inventory: None,
         };
         let value = serde_json::to_value(&report).unwrap();
         assert!(value.get("summary").is_some());
@@ -39,6 +62,29 @@ mod tests {
         assert_eq!(value["policy"]["warning_days"], 30);
         assert_eq!(value["policy"]["critical_days"], 7);
         assert_eq!(value["policy"]["min_rsa_key_size"], 2048);
+        assert!(value.get("inventory").is_none());
+    }
+
+    #[test]
+    fn json_report_embeds_inventory_info_with_policy() {
+        let result = ScanResult::new(Vec::new(), Vec::new(), Vec::new());
+        let policy = Policy {
+            min_rsa_key_size: 4096,
+            ..Policy::default()
+        };
+        let report = JsonReport {
+            result: &result,
+            policy: &policy,
+            inventory: Some(InventoryInfo {
+                source: "inventory.toml".into(),
+                targets: 12,
+            }),
+        };
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["inventory"]["source"], "inventory.toml");
+        assert_eq!(value["inventory"]["targets"], 12);
+        assert_eq!(value["policy"]["min_rsa_key_size"], 4096);
+        assert!(value.get("summary").is_some());
     }
 
     #[test]

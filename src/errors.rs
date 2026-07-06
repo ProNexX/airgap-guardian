@@ -10,6 +10,22 @@ pub enum ScanError {
 }
 
 #[derive(Debug, Error)]
+pub enum InventoryError {
+    #[error("cannot read inventory file {}", .path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("invalid inventory file {}", .path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("invalid inventory: {0}")]
+    Invalid(String),
+}
+
+#[derive(Debug, Error)]
 pub enum PolicyError {
     #[error("cannot read policy file {}", .path.display())]
     Read {

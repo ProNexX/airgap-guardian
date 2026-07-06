@@ -2,6 +2,7 @@ mod analysis;
 mod cli;
 mod discover;
 mod errors;
+mod inventory;
 mod models;
 mod policy;
 mod report;
@@ -14,14 +15,11 @@ use clap::Parser;
 use clap::error::ErrorKind;
 
 use cli::{Cli, Command, ScannerKind};
-use errors::{PolicyError, ScanError};
+use errors::{InventoryError, PolicyError, ScanError};
+use inventory::Inventory;
 use models::ScanResult;
 use policy::Policy;
 use scanner::Scanner;
-use scanner::cert::CertificateScanner;
-use scanner::jwt::JwtScanner;
-use scanner::secrets::SecretsScanner;
-use scanner::ssh::SshScanner;
 
 const EXIT_OK: u8 = 0;
 const EXIT_WARNING: u8 = 1;
@@ -48,11 +46,12 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Scan {
             directory,
+            inventory,
             json,
             html,
             policy,
             scanners,
-        } => run_scan(directory, json, html, policy, &scanners),
+        } => run_scan(directory, inventory, json, html, policy, &scanners),
         Command::Discover {
             directory,
             output,
@@ -73,7 +72,8 @@ fn main() -> ExitCode {
 }
 
 fn run_scan(
-    directory: PathBuf,
+    directory: Option<PathBuf>,
+    inventory_file: Option<PathBuf>,
     json: bool,
     html: Option<PathBuf>,
     policy_file: Option<PathBuf>,
@@ -84,23 +84,38 @@ fn run_scan(
         Err(e) => return report_failure(&e.into()),
     };
 
-    let scanners = build_scanners(scanner_kinds);
-    let mut result = match scanner::scan_directory(&directory, &scanners) {
-        Ok(result) => result,
-        Err(e) => return report_failure(&e),
+    let (mut result, inventory) = if let Some(file) = inventory_file {
+        let inventory = match Inventory::load(&file) {
+            Ok(inventory) => inventory,
+            Err(e) => return report_failure(&e.into()),
+        };
+        (inventory.scan(), Some(inventory))
+    } else if let Some(directory) = directory {
+        let scanners = build_scanners(scanner_kinds);
+        match scanner::scan_directory(&directory, &scanners) {
+            Ok(result) => (result, None),
+            Err(e) => return report_failure(&e),
+        }
+    } else {
+        unreachable!("clap requires either a directory or --inventory");
     };
     analysis::analyze(&mut result, &policy);
 
     if json {
-        if let Err(e) = report::json::print(&result, &policy) {
+        if let Err(e) = report::json::print(&result, &policy, inventory.as_ref()) {
             return report_failure(&e);
         }
     } else {
+        if let Some(inventory) = &inventory {
+            println!("Loaded inventory: {}", inventory.source().display());
+            println!("Targets: {}", inventory.target_count());
+            println!();
+        }
         report::terminal::print(&result);
     }
 
     if let Some(path) = html {
-        if let Err(e) = report::html::write(&result, &policy, &path) {
+        if let Err(e) = report::html::write(&result, &policy, inventory.as_ref(), &path) {
             return report_failure(&e);
         }
         eprintln!("HTML report written to {}", path.display());
@@ -168,7 +183,7 @@ fn run_inventory(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitC
     }
 
     if let Some(path) = html {
-        if let Err(e) = report::html::write(&result, &policy, &path) {
+        if let Err(e) = report::html::write(&result, &policy, None, &path) {
             return report_failure(&e);
         }
         eprintln!("HTML report written to {}", path.display());
@@ -183,17 +198,7 @@ fn build_scanners(kinds: &[ScannerKind]) -> Vec<Box<dyn Scanner>> {
     } else {
         kinds
     };
-    kinds
-        .iter()
-        .map(|kind| -> Box<dyn Scanner> {
-            match kind {
-                ScannerKind::Cert => Box::new(CertificateScanner::new()),
-                ScannerKind::Ssh => Box::new(SshScanner),
-                ScannerKind::Secrets => Box::new(SecretsScanner),
-                ScannerKind::Jwt => Box::new(JwtScanner),
-            }
-        })
-        .collect()
+    scanner::build_scanners(kinds.iter().map(|kind| kind.asset_type()))
 }
 
 fn load_policy(path: Option<&std::path::Path>) -> Result<Policy, PolicyError> {
@@ -211,7 +216,9 @@ fn report_failure(error: &anyhow::Error) -> ExitCode {
                 EXIT_DIRECTORY_NOT_FOUND
             }
         }
-    } else if error.downcast_ref::<PolicyError>().is_some() {
+    } else if error.downcast_ref::<PolicyError>().is_some()
+        || error.downcast_ref::<InventoryError>().is_some()
+    {
         EXIT_POLICY_ERROR
     } else {
         EXIT_RUNTIME_ERROR

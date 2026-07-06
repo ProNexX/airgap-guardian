@@ -2,14 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use walkdir::DirEntry;
 
+use crate::inventory::{self, Target};
 use crate::models::{AssetType, ParseFailure};
 use crate::scanner::{jwt, secrets, ssh, validate_root, walk};
-
-pub const INVENTORY_VERSION: u32 = 1;
 
 const CERT_EXTENSIONS: [&str; 8] = ["pem", "crt", "cer", "der", "p7b", "p7c", "p12", "pfx"];
 const SSH_DIR_NAME: &str = ".ssh";
@@ -36,18 +35,6 @@ pub struct Discovery {
     pub errors: Vec<ParseFailure>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct Target {
-    pub path: String,
-    pub scanners: Vec<AssetType>,
-}
-
-#[derive(Serialize)]
-struct InventoryFile {
-    version: u32,
-    scan: Vec<Target>,
-}
-
 #[derive(Serialize)]
 struct JsonReport {
     version: u32,
@@ -66,7 +53,7 @@ impl Discovery {
         self.targets
             .iter()
             .map(|(path, kinds)| Target {
-                path: path.display().to_string(),
+                path: path.clone(),
                 scanners: kinds.iter().copied().collect(),
             })
             .collect()
@@ -170,16 +157,12 @@ fn is_secret_file(name: &str) -> bool {
 }
 
 pub fn to_toml(discovery: &Discovery) -> Result<String> {
-    toml::to_string(&InventoryFile {
-        version: INVENTORY_VERSION,
-        scan: discovery.targets(),
-    })
-    .map_err(|e| anyhow!(e).context("failed to serialize inventory"))
+    inventory::to_toml(discovery.targets())
 }
 
 pub fn to_json(discovery: &Discovery) -> Result<String> {
     serde_json::to_string_pretty(&JsonReport {
-        version: INVENTORY_VERSION,
+        version: inventory::VERSION,
         targets: discovery.targets(),
     })
     .context("failed to serialize discovery result")
@@ -260,7 +243,7 @@ mod tests {
     #[test]
     fn targets_are_sorted_and_unique() {
         let targets = discover_testdata().targets();
-        let paths: Vec<&str> = targets.iter().map(|t| t.path.as_str()).collect();
+        let paths: Vec<&Path> = targets.iter().map(|t| t.path.as_path()).collect();
         let mut sorted = paths.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -291,9 +274,9 @@ mod tests {
         classify_directory(Path::new("/opt/app/src"), &mut discovery);
         let targets = discovery.targets();
         assert_eq!(targets.len(), 2);
-        assert_eq!(targets[0].path, "/home/alice/.ssh");
+        assert_eq!(targets[0].path, Path::new("/home/alice/.ssh"));
         assert_eq!(targets[0].scanners, [AssetType::Ssh]);
-        assert_eq!(targets[1].path, "/opt/app/secrets");
+        assert_eq!(targets[1].path, Path::new("/opt/app/secrets"));
         assert_eq!(targets[1].scanners, [AssetType::Secret]);
     }
 

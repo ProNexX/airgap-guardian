@@ -1,9 +1,133 @@
 version = 1
 
 [[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/certifi"
+scanners = ["cert"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/future/backports/test"
+scanners = ["cert"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/modelscope/models/cv/facial_68ldk_detection/conf"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/modelscope/models/cv/image_matching/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/modelscope/models/cv/image_matching_fast/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/modelscope/models/cv/video_depth_estimation/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/modelscope/models/cv/video_single_object_tracking/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/nvidia/cu13/include/cccl/thrust/detail/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/paddlex/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/paddlex/inference/genai/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/pandas/tests/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/pip/_vendor/certifi"
+scanners = ["cert"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/setuptools/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/.venv/lib/python3.11/site-packages/setuptools/tests/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/activity-agent/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/airgap-guardian/src/scanner"
+scanners = ["jwt"]
+
+[[scan]]
 path = "/home/muham/Projects/airgap-guardian/testdata"
 scanners = ["cert"]
 
 [[scan]]
+path = "/home/muham/Projects/airgap-guardian/testdata/nested"
+scanners = ["cert"]
+
+[[scan]]
 path = "/home/muham/Projects/airgap-guardian/testdata/secrets"
+scanners = ["secret", "jwt"]
+
+[[scan]]
+path = "/home/muham/Projects/airgap-guardian/testdata/ssh"
+scanners = ["ssh"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/@eslint/eslintrc/conf"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/@eslint/js/src/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/@typescript-eslint/eslint-plugin/dist/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/aria-query/lib/etc"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/axobject-query/lib/etc"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/eslint/conf"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/eslint/lib/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/eslint-plugin-import/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/eslint-plugin-jsx-a11y/lib/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/eslint-plugin-react/configs"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/next/dist/build/webpack/config"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/next/dist/compiled/conf"
+scanners = ["secret"]
+
+[[scan]]
+path = "/home/muham/Projects/portfolio/node_modules/next/dist/esm/build/webpack/config"
 scanners = ["secret"]
