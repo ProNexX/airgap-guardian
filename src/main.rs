@@ -1,5 +1,6 @@
 mod analysis;
 mod cli;
+mod discover;
 mod errors;
 mod models;
 mod policy;
@@ -52,6 +53,18 @@ fn main() -> ExitCode {
             policy,
             scanners,
         } => run_scan(directory, json, html, policy, &scanners),
+        Command::Discover {
+            directory,
+            output,
+            json,
+            follow_symlinks,
+            max_depth,
+        } => run_discover(directory, output, json, follow_symlinks, max_depth),
+        Command::Inventory {
+            directory,
+            json,
+            html,
+        } => run_inventory(directory, json, html),
         Command::Version => {
             println!("airgap-guardian {}", env!("CARGO_PKG_VERSION"));
             ExitCode::from(EXIT_OK)
@@ -94,6 +107,74 @@ fn run_scan(
     }
 
     ExitCode::from(severity_exit_code(&result))
+}
+
+fn run_discover(
+    directory: PathBuf,
+    output: PathBuf,
+    json: bool,
+    follow_symlinks: bool,
+    max_depth: Option<usize>,
+) -> ExitCode {
+    let options = discover::Options {
+        follow_symlinks,
+        max_depth,
+    };
+    let discovery = match discover::discover(&directory, &options) {
+        Ok(discovery) => discovery,
+        Err(e) => return report_failure(&e),
+    };
+    for failure in &discovery.errors {
+        eprintln!("Warning: {}: {}", failure.path, failure.error);
+    }
+
+    if json {
+        match discover::to_json(&discovery) {
+            Ok(report) => println!("{report}"),
+            Err(e) => return report_failure(&e),
+        }
+    } else {
+        discover::print_terminal(&discovery);
+    }
+
+    let inventory = match discover::to_toml(&discovery) {
+        Ok(inventory) => inventory,
+        Err(e) => return report_failure(&e),
+    };
+    if let Err(e) = std::fs::write(&output, inventory) {
+        let error = anyhow::Error::new(e)
+            .context(format!("cannot write inventory file {}", output.display()));
+        return report_failure(&error);
+    }
+    eprintln!("Inventory written to {}", output.display());
+    ExitCode::from(EXIT_OK)
+}
+
+fn run_inventory(directory: PathBuf, json: bool, html: Option<PathBuf>) -> ExitCode {
+    let policy = Policy::default();
+    let scanners = build_scanners(&[]);
+    let mut result = match scanner::scan_directory(&directory, &scanners) {
+        Ok(result) => result,
+        Err(e) => return report_failure(&e),
+    };
+    analysis::analyze(&mut result, &policy);
+
+    if json {
+        if let Err(e) = report::inventory::print_json(&result) {
+            return report_failure(&e);
+        }
+    } else {
+        report::inventory::print(&result);
+    }
+
+    if let Some(path) = html {
+        if let Err(e) = report::html::write(&result, &policy, &path) {
+            return report_failure(&e);
+        }
+        eprintln!("HTML report written to {}", path.display());
+    }
+
+    ExitCode::from(EXIT_OK)
 }
 
 fn build_scanners(kinds: &[ScannerKind]) -> Vec<Box<dyn Scanner>> {

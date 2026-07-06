@@ -31,6 +31,34 @@ pub enum Command {
         #[arg(long, value_name = "LIST", value_delimiter = ',')]
         scanners: Vec<ScannerKind>,
     },
+    /// Discover likely security asset locations and write a reusable inventory file
+    Discover {
+        /// Directory to search recursively
+        directory: PathBuf,
+        /// File to write the discovered scan targets to
+        #[arg(long, value_name = "FILE", default_value = "inventory.toml")]
+        output: PathBuf,
+        /// Output discovered targets as JSON
+        #[arg(long)]
+        json: bool,
+        /// Follow symbolic links while searching
+        #[arg(long)]
+        follow_symlinks: bool,
+        /// Maximum directory depth to descend into
+        #[arg(long, value_name = "N")]
+        max_depth: Option<usize>,
+    },
+    /// Catalog every certificate, SSH key, secret, and JWT token found under a directory
+    Inventory {
+        /// Directory to inventory recursively
+        directory: PathBuf,
+        /// Output the inventory as JSON
+        #[arg(long)]
+        json: bool,
+        /// Write a standalone HTML report to the given file
+        #[arg(long, value_name = "FILE")]
+        html: Option<PathBuf>,
+    },
     /// Print version information
     Version,
 }

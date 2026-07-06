@@ -1,0 +1,9 @@
+version = 1
+
+[[scan]]
+path = "/home/muham/Projects/airgap-guardian/testdata"
+scanners = ["cert"]
+
+[[scan]]
+path = "/home/muham/Projects/airgap-guardian/testdata/secrets"
+scanners = ["secret"]

@@ -1,4 +1,5 @@
 pub mod html;
+pub mod inventory;
 pub mod json;
 pub mod terminal;
 

@@ -16,6 +16,10 @@ static TOKEN_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 
 pub struct JwtScanner;
 
+pub(crate) fn contains_token(text: &str) -> bool {
+    TOKEN_PATTERN.is_match(text)
+}
+
 impl Scanner for JwtScanner {
     fn can_scan(&self, path: &Path, size: u64) -> bool {
         size <= secrets::MAX_FILE_SIZE && !ssh::is_ssh_file(path)
