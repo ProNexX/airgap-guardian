@@ -11,6 +11,8 @@ It scans directories with four scanners:
 
 Every certificate and asset receives a risk score from 0 to 100. All security thresholds are driven by a configurable policy engine: pass a TOML policy file with `--policy`, or rely on built-in defaults. Results are available as a terminal table, JSON, or a standalone HTML report.
 
+Beyond `scan`, the `discover` command quickly locates likely asset locations and writes a reusable `inventory.toml`, and the `inventory` command catalogs every discovered asset in full detail.
+
 ## Installation
 
 Requires a stable Rust toolchain (https://rustup.rs).
@@ -35,6 +37,8 @@ airgap-guardian scan <directory> --json             # scan and print JSON
 airgap-guardian scan <directory> --html <file>      # also write an HTML report
 airgap-guardian scan <directory> --policy <file>    # scan with a custom policy
 airgap-guardian scan <directory> --scanners <list>  # run only selected scanners
+airgap-guardian discover <directory>                # locate scan targets, write inventory.toml
+airgap-guardian inventory <directory>               # catalog every security asset
 airgap-guardian version                             # print version
 airgap-guardian --help                              # show help
 ```
@@ -122,6 +126,7 @@ With `--json`:
       "subject": "CN=ldap.example.test",
       "issuer": "CN=Example Internal CA",
       "serial_number": "1f:91:cc:50:...",
+      "fingerprint_sha256": "a25f648f5f5a624defba9027523e87b55da9b99fbeaffc08ff9cc041ee456916",
       "not_before": "2026-07-02T20:06:19Z",
       "not_after": "2026-07-16T20:06:19Z",
       "days_remaining": 14,
@@ -182,7 +187,110 @@ With `--json`:
 }
 ```
 
-The `policy` object always contains the effective values used for the scan, whether they came from a policy file or from the built-in defaults. Every entry carries an `asset_type` (`cert`, `ssh`, `secret`, or `jwt`); non-certificate assets appear in the `assets` array with type-specific `details`.
+The `policy` object always contains the effective values used for the scan, whether they came from a policy file or from the built-in defaults. Every entry carries an `asset_type` (`cert`, `ssh`, `secret`, or `jwt`); non-certificate assets appear in the `assets` array with type-specific `details`. Certificates carry a `fingerprint_sha256` (hex SHA-256 of the DER encoding); OpenSSH-format private keys carry an OpenSSH-style `fingerprint` (`SHA256:` + base64 of the public key hash).
+
+## Discovering Scan Targets
+
+`discover` searches a directory tree for locations that likely contain security assets and writes a reusable inventory configuration file. It does not fully analyze files — classification is metadata-first (file names, extensions, directory names); only small text files are probed for JWT structures.
+
+```
+airgap-guardian discover /
+airgap-guardian discover /etc
+airgap-guardian discover / --output inventory.toml
+airgap-guardian discover / --json
+airgap-guardian discover / --follow-symlinks --max-depth 4
+```
+
+| Option | Meaning |
+|--------|---------|
+| `--output <file>` | Inventory file to write (default: `inventory.toml`) |
+| `--json` | Print discovered targets as JSON instead of the terminal listing |
+| `--follow-symlinks` | Follow symbolic links while searching (off by default) |
+| `--max-depth <n>` | Maximum directory depth to descend into |
+
+Locations are detected per asset type:
+
+* **Certificates** — files with extensions `.pem`, `.crt`, `.cer`, `.der`, `.p7b`, `.p7c`, `.p12`, `.pfx`
+* **SSH** — `.ssh` directories and files named `id_rsa`, `id_ed25519`, `id_ecdsa`, `authorized_keys`, `known_hosts`
+* **Secrets** — directories named `config`, `configs`, `conf`, `etc`, `secrets`; files named `.env`, `*.env`, `config.json`, `config.yaml`, `config.yml`, `settings.json`, `settings.toml`, `docker-compose.yml`, `kubeconfig`
+* **JWT** — text files smaller than 1 MiB containing a JWT structure
+
+Terminal output lists the discovered locations per asset type followed by a summary. The generated inventory file contains one `[[scan]]` entry per directory, with duplicate paths merged, scanner lists combined, paths normalized to absolute form, and entries sorted alphabetically:
+
+```toml
+version = 1
+
+[[scan]]
+path = "/etc/ssl"
+scanners = ["cert"]
+
+[[scan]]
+path = "/opt/app"
+scanners = ["cert", "secret", "jwt"]
+
+[[scan]]
+path = "/root/.ssh"
+scanners = ["ssh"]
+```
+
+With `--json` the same targets are printed as `{"version": 1, "targets": [{"path": ..., "scanners": [...]}]}`; the inventory file is written either way, and the confirmation message goes to stderr so stdout stays clean.
+
+## Asset Inventory
+
+`inventory` performs a full scan that catalogs every discovered security asset. Unlike `scan`, which reports findings, `inventory` records every asset with its complete details. It reuses the same scanners and single-pass directory walk.
+
+```
+airgap-guardian inventory /
+airgap-guardian inventory /etc
+airgap-guardian inventory /opt --json
+airgap-guardian inventory /opt --html report.html
+```
+
+Each record includes:
+
+* **Certificates** — path, subject, issuer, serial, SHA-256 fingerprint, algorithm, key size, validity, expiration, CA flag, self-signed flag, risk score
+* **SSH keys** — path, type, key bits, encryption status, fingerprint (OpenSSH format keys), `authorized_keys` entries, `known_hosts` entry count
+* **Secrets** — path, matched rule, line number, redacted preview
+* **JWT** — path, algorithm, issuer, audience, expiration, risk score
+
+```
+Asset Inventory
+
+Certificates
+
+/etc/ssl/server.crt
+  Subject      CN=server.example
+  Issuer       CN=Internal CA
+  Serial       6d:2a:7b:...
+  Fingerprint  SHA256:925332b0...
+  Algorithm    sha256WithRSAEncryption
+  Key size     2048 bits
+  Valid from   2026-07-02
+  Expires      2027-05-12 (OK)
+  CA           No
+  Self-signed  No
+  Risk         10
+
+SSH Keys
+
+/root/.ssh/id_rsa
+  Type         RSA
+  Bits         4096
+  Encrypted    Yes
+  Fingerprint  SHA256:qSLgv1Y2...
+
+...
+
+Summary
+
+Certificates      82
+SSH Keys          14
+Secrets           8
+JWT Tokens        5
+Parse errors      0
+```
+
+With `--json`, the inventory is emitted as `{"summary": {"certificates": ..., "ssh_keys": ..., "secrets": ..., "jwt": ...}, "certificates": [...], "ssh": [...], "secrets": [...], "jwt": [...], "errors": [...]}`, reusing the same per-asset JSON structures as `scan`. `--html` writes the standard HTML report. Risk scores are computed with the built-in default policy. `inventory` exits with 0 on success regardless of findings; failure exit codes (4–6) match `scan`.
 
 ## Supported Certificate Formats
 
@@ -383,7 +491,7 @@ The total is capped at 100. The score appears in the terminal tables, the JSON o
 
 ## Exit Codes
 
-The highest severity encountered is returned.
+For `scan`, the highest severity encountered is returned. `discover` and `inventory` return 0 on success and share the failure codes (4–6).
 
 | Code | Meaning |
 |------|---------|
