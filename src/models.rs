@@ -114,7 +114,7 @@ impl fmt::Display for RiskScore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetType {
     Cert,
@@ -151,6 +151,7 @@ pub enum AssetDetails {
         algorithm: String,
         key_bits: Option<usize>,
         encrypted: bool,
+        fingerprint: Option<String>,
     },
     SshAuthorizedKeys {
         keys: Vec<SshPublicKeyEntry>,
@@ -194,6 +195,7 @@ pub struct CertificateInfo {
     pub subject: String,
     pub issuer: String,
     pub serial_number: String,
+    pub fingerprint_sha256: String,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
     pub days_remaining: i64,
@@ -349,6 +351,7 @@ mod tests {
             subject: "CN=test".into(),
             issuer: "CN=test".into(),
             serial_number: "01".into(),
+            fingerprint_sha256: "00".repeat(32),
             not_before: now,
             not_after,
             days_remaining: days_remaining(not_after, now),

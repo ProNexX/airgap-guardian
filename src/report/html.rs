@@ -389,6 +389,7 @@ mod tests {
             subject: "CN=vpn".into(),
             issuer: "CN=issuer".into(),
             serial_number: "01".into(),
+            fingerprint_sha256: "00".repeat(32),
             not_before: now - Duration::days(30),
             not_after,
             days_remaining: days_remaining(not_after, now),

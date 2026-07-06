@@ -11,7 +11,7 @@ use x509_parser::public_key::PublicKey;
 use x509_parser::time::ASN1Time;
 
 use crate::models::{AssetType, CertificateInfo, CertificateStatus, RiskScore, days_remaining};
-use crate::scanner::{ScanItem, Scanner};
+use crate::scanner::{ScanItem, Scanner, hex_lower, sha256};
 
 const SUPPORTED_EXTENSIONS: [&str; 4] = ["pem", "crt", "cer", "der"];
 
@@ -82,7 +82,7 @@ fn parse_pem(path: &Path, data: &[u8], now: DateTime<Utc>) -> Result<Vec<Certifi
         let cert = pem
             .parse_x509()
             .with_context(|| format!("invalid certificate in PEM block {index}"))?;
-        certificates.push(extract_info(path, &cert, now)?);
+        certificates.push(extract_info(path, &cert, &pem.contents, now)?);
     }
     if certificates.is_empty() {
         bail!("no CERTIFICATE blocks found in PEM file");
@@ -93,12 +93,13 @@ fn parse_pem(path: &Path, data: &[u8], now: DateTime<Utc>) -> Result<Vec<Certifi
 fn parse_der(path: &Path, data: &[u8], now: DateTime<Utc>) -> Result<Vec<CertificateInfo>> {
     let (_, cert) =
         X509Certificate::from_der(data).map_err(|e| anyhow!("invalid DER certificate: {e}"))?;
-    Ok(vec![extract_info(path, &cert, now)?])
+    Ok(vec![extract_info(path, &cert, data, now)?])
 }
 
 fn extract_info(
     path: &Path,
     cert: &X509Certificate,
+    der: &[u8],
     now: DateTime<Utc>,
 ) -> Result<CertificateInfo> {
     let not_before = to_datetime(&cert.validity().not_before)?;
@@ -110,6 +111,7 @@ fn extract_info(
         subject: cert.subject().to_string(),
         issuer: cert.issuer().to_string(),
         serial_number: cert.raw_serial_as_string(),
+        fingerprint_sha256: hex_lower(&sha256(der)),
         not_before,
         not_after,
         days_remaining: days_remaining(not_after, now),
@@ -236,6 +238,10 @@ mod tests {
             .expect("api.pem should be scanned");
         assert!(cert.subject.contains("api.example.test"));
         assert!(!cert.serial_number.is_empty());
+        assert_eq!(
+            cert.fingerprint_sha256,
+            "925332b07b966d293868acf400f64fb67d7d8af2918abb03869adca9422b0b6b"
+        );
         assert_eq!(cert.key_size, Some(2048));
         assert_eq!(cert.status, CertificateStatus::Ok);
         assert!(cert.days_remaining > 30);

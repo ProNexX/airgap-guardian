@@ -107,6 +107,7 @@ pub fn evaluate_asset(asset: &AssetInfo, policy: &Policy, now: DateTime<Utc>) ->
             algorithm,
             key_bits,
             encrypted,
+            ..
         } => ssh_private_key_findings(algorithm, *key_bits, *encrypted, policy),
         AssetDetails::SshAuthorizedKeys { keys } => authorized_keys_findings(keys, policy),
         AssetDetails::SshKnownHosts { .. } => Vec::new(),
@@ -332,6 +333,7 @@ mod tests {
             subject: "CN=test".into(),
             issuer: "CN=issuer".into(),
             serial_number: "01".into(),
+            fingerprint_sha256: "00".repeat(32),
             not_before,
             not_after,
             days_remaining: days_remaining(not_after, now),
@@ -595,6 +597,7 @@ mod tests {
                 algorithm: "RSA".into(),
                 key_bits: Some(1024),
                 encrypted: false,
+                fingerprint: None,
             },
         );
         let findings = evaluate_now(&key);
@@ -611,6 +614,7 @@ mod tests {
                 algorithm: "ED25519".into(),
                 key_bits: Some(256),
                 encrypted: true,
+                fingerprint: None,
             },
         );
         assert!(evaluate_now(&strong).is_empty());

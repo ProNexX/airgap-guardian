@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use crate::models::{AssetDetails, AssetInfo, AssetType, RiskScore, SshPublicKeyEntry};
-use crate::scanner::{ScanItem, Scanner, decode_base64};
+use crate::scanner::{ScanItem, Scanner, decode_base64, encode_base64_nopad, sha256};
 
 const PRIVATE_KEY_FILES: [&str; 3] = ["id_rsa", "id_ecdsa", "id_ed25519"];
 const AUTHORIZED_KEYS: &str = "authorized_keys";
@@ -65,6 +65,22 @@ struct PrivateKey {
     algorithm: String,
     key_bits: Option<usize>,
     encrypted: bool,
+    fingerprint: Option<String>,
+}
+
+impl PrivateKey {
+    fn new(algorithm: &str, key_bits: Option<usize>, encrypted: bool) -> Self {
+        Self {
+            algorithm: algorithm.into(),
+            key_bits,
+            encrypted,
+            fingerprint: None,
+        }
+    }
+}
+
+fn public_key_fingerprint(blob: &[u8]) -> String {
+    format!("SHA256:{}", encode_base64_nopad(&sha256(blob)))
 }
 
 fn parse_private_key(path: &Path, text: &str) -> Result<AssetInfo> {
@@ -85,32 +101,12 @@ fn parse_private_key(path: &Path, text: &str) -> Result<AssetInfo> {
             } else {
                 decode_base64(&block.body).and_then(|der| pkcs1_modulus_bits(&der))
             };
-            PrivateKey {
-                algorithm: "RSA".into(),
-                key_bits,
-                encrypted,
-            }
+            PrivateKey::new("RSA", key_bits, encrypted)
         }
-        "EC PRIVATE KEY" => PrivateKey {
-            algorithm: "ECDSA".into(),
-            key_bits: None,
-            encrypted: block.encrypted_headers,
-        },
-        "DSA PRIVATE KEY" => PrivateKey {
-            algorithm: "DSA".into(),
-            key_bits: None,
-            encrypted: block.encrypted_headers,
-        },
-        "ENCRYPTED PRIVATE KEY" => PrivateKey {
-            algorithm: "unknown".into(),
-            key_bits: None,
-            encrypted: true,
-        },
-        "PRIVATE KEY" => PrivateKey {
-            algorithm: "unknown".into(),
-            key_bits: None,
-            encrypted: false,
-        },
+        "EC PRIVATE KEY" => PrivateKey::new("ECDSA", None, block.encrypted_headers),
+        "DSA PRIVATE KEY" => PrivateKey::new("DSA", None, block.encrypted_headers),
+        "ENCRYPTED PRIVATE KEY" => PrivateKey::new("unknown", None, true),
+        "PRIVATE KEY" => PrivateKey::new("unknown", None, false),
         label => bail!("unsupported PEM block: {label}"),
     };
 
@@ -130,6 +126,7 @@ fn parse_private_key(path: &Path, text: &str) -> Result<AssetInfo> {
             algorithm: key.algorithm,
             key_bits: key.key_bits,
             encrypted: key.encrypted,
+            fingerprint: key.fingerprint,
         },
     ))
 }
@@ -188,6 +185,7 @@ fn parse_openssh_private_key(data: &[u8]) -> Option<PrivateKey> {
         algorithm: display_algorithm(&algorithm),
         key_bits,
         encrypted: cipher != b"none",
+        fingerprint: Some(public_key_fingerprint(public_key_blob)),
     })
 }
 
@@ -369,6 +367,7 @@ mod tests {
             algorithm,
             key_bits,
             encrypted,
+            ..
         } = &key.details
         else {
             panic!("expected private key details");
@@ -386,6 +385,7 @@ mod tests {
             algorithm,
             key_bits,
             encrypted,
+            fingerprint,
         } = &key.details
         else {
             panic!("expected private key details");
@@ -393,6 +393,10 @@ mod tests {
         assert_eq!(algorithm, "ED25519");
         assert_eq!(*key_bits, Some(256));
         assert!(!encrypted);
+        assert_eq!(
+            fingerprint.as_deref(),
+            Some("SHA256:dhUpLPkA4qqwY4+kHeL5LcCYDfhLf42062qgdhJVUic")
+        );
     }
 
     #[test]
@@ -432,6 +436,7 @@ mod tests {
             algorithm,
             key_bits,
             encrypted,
+            fingerprint,
         } = asset.details
         else {
             panic!("expected private key details");
@@ -439,6 +444,7 @@ mod tests {
         assert_eq!(algorithm, "RSA");
         assert_eq!(key_bits, None);
         assert!(encrypted);
+        assert_eq!(fingerprint, None);
     }
 
     #[test]
